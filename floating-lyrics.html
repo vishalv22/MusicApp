@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            background: transparent;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            overflow: hidden;
+            cursor: move;
+            -webkit-app-region: drag;
+        }
+        
+        .floating-lyrics {
+            padding: 20px;
+            height: 100vh;
+            overflow-y: auto;
+        }
+        
+        .lyric-line {
+            padding: 4px 0;
+            font-size: 20px;
+            line-height: 1.5;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8), 0 0 10px rgba(0,0,0,0.5);
+            text-align: center;
+            word-wrap: break-word;
+            transform: translateY(10px);
+            opacity: 0.6;
+            transition: transform 0.4s ease, opacity 0.4s ease;
+        }
+        
+        .lyric-line.active {
+            transform: translateY(0);
+            opacity: 1;
+        }
+        
+        .char {
+            color: #888;
+            transition: color 0.1s ease;
+            text-shadow: 
+                2px 2px 0px #000,
+                -2px -2px 0px #000,
+                2px -2px 0px #000,
+                -2px 2px 0px #000,
+                0px 2px 0px #000,
+                2px 0px 0px #000,
+                0px -2px 0px #000,
+                -2px 0px 0px #000,
+                3px 3px 8px rgba(0,0,0,0.8);
+        }
+        
+        .char.lit {
+            color: #fff;
+            text-shadow: 
+                2px 2px 0px #000,
+                -2px -2px 0px #000,
+                2px -2px 0px #000,
+                -2px 2px 0px #000,
+                0px 2px 0px #000,
+                2px 0px 0px #000,
+                0px -2px 0px #000,
+                -2px 0px 0px #000,
+                3px 3px 8px rgba(0,0,0,0.8);
+        }
+        
+        .no-lyrics {
+            color: #666;
+            text-align: center;
+            padding: 40px;
+            font-style: italic;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+        }
+        
+        .song-info-display {
+            text-align: center;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100%;
+        }
+        
+        .info-line {
+            color: #888;
+            font-size: 18px;
+            margin: 8px 0;
+            font-style: italic;
+            text-shadow: 
+                2px 2px 0px #000,
+                -2px -2px 0px #000,
+                2px -2px 0px #000,
+                -2px 2px 0px #000,
+                0px 2px 0px #000,
+                2px 0px 0px #000,
+                0px -2px 0px #000,
+                -2px 0px 0px #000,
+                3px 3px 8px rgba(0,0,0,0.8);
+        }
+        
+        .close-btn {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            width: 24px;
+            height: 24px;
+            background: rgba(0,0,0,0.6);
+            color: white;
+            border: none;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 12px;
+            -webkit-app-region: no-drag;
+        }
+        
+        .close-btn:hover {
+            background: rgba(255,0,0,0.8);
+        }
+        
+        .floating-lyrics::-webkit-scrollbar {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="floating-lyrics" id="lyricsContainer">
+        <p class="no-lyrics">Select a song to see lyrics</p>
+    </div>
+    <button class="close-btn" onclick="closeWindow()">×</button>
+    
+    <script>
+        const { ipcRenderer } = require('electron');
+        
+        let lyrics = [];
+        let currentIndex = -1;
+        let songInfo = null;
+        const lyricsContainer = document.getElementById('lyricsContainer');
+        
+        ipcRenderer.on('update-lyric', (event, data) => {
+            if (data.songInfo) {
+                songInfo = data.songInfo;
+            }
+            
+            if (data.lyrics !== undefined) {
+                lyrics = data.lyrics;
+                if (data.lyrics.length === 0) {
+                    // Show song info when no lyrics or before lyrics start
+                    if (songInfo) {
+                        lyricsContainer.innerHTML = `
+                            <div class="song-info-display">
+                                <div class="info-line">Playing music: ${escapeHtml(songInfo.title)}</div>
+                                <div class="info-line">by: ${escapeHtml(songInfo.artist)}</div>
+                            </div>
+                        `;
+                    } else {
+                        lyricsContainer.innerHTML = '<p class="no-lyrics">Select a song to see lyrics</p>';
+                    }
+                    return;
+                }
+            }
+            
+            if (data.currentIndex !== undefined) {
+                currentIndex = data.currentIndex;
+                if (currentIndex === -1 && songInfo) {
+                    // Show song info before first lyric appears
+                    lyricsContainer.innerHTML = `
+                        <div class="song-info-display">
+                            <div class="info-line">Playing music: ${escapeHtml(songInfo.title)}</div>
+                            <div class="info-line">by: ${escapeHtml(songInfo.artist)}</div>
+                        </div>
+                    `;
+                } else {
+                    displayThreeLines();
+                }
+            }
+        });
+        
+        function displayThreeLines() {
+            if (lyrics.length === 0) {
+                lyricsContainer.innerHTML = '<p class="no-lyrics">No lyrics available</p>';
+                return;
+            }
+            
+            lyricsContainer.innerHTML = '';
+            
+            // Previous line
+            const prevDiv = document.createElement('div');
+            prevDiv.className = 'lyric-line';
+            prevDiv.innerHTML = wrapChars(currentIndex > 0 ? lyrics[currentIndex - 1].text : '');
+            lyricsContainer.appendChild(prevDiv);
+            
+            // Current line
+            const currDiv = document.createElement('div');
+            currDiv.className = 'lyric-line';
+            currDiv.innerHTML = wrapChars(currentIndex >= 0 ? lyrics[currentIndex].text : '');
+            lyricsContainer.appendChild(currDiv);
+            
+            // Next line
+            const nextDiv = document.createElement('div');
+            nextDiv.className = 'lyric-line';
+            nextDiv.innerHTML = wrapChars(currentIndex < lyrics.length - 1 ? lyrics[currentIndex + 1].text : '');
+            lyricsContainer.appendChild(nextDiv);
+            
+            // Trigger slide animation
+            setTimeout(() => {
+                currDiv.classList.add('active');
+                animateText(currDiv);
+            }, 50);
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        function wrapChars(text) {
+            return text.split('').map(char => 
+                char === ' ' ? ' ' : `<span class="char">${escapeHtml(char)}</span>`
+            ).join('');
+        }
+        
+        function animateText(element) {
+            const chars = element.querySelectorAll('.char');
+            chars.forEach((char, index) => {
+                setTimeout(() => {
+                    char.classList.add('lit');
+                }, index * 80);
+            });
+        }
+        
+        function closeWindow() {
+            ipcRenderer.send('close-floating-lyrics');
+        }
+    </script>
+</body>
+</html>

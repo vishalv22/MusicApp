@@ -1,0 +1,40 @@
+{
+  "name": "vimusic",
+  "version": "1.0.0",
+  "description": "ViMusic - A music player with synchronized lyrics",
+  "main": "main.js",
+  "author": "Vishal",
+  "dependencies": {
+    "dompurify": "^3.2.6",
+    "music-metadata": "^10.5.0"
+  },
+  "devDependencies": {
+    "electron": "^38.0.0",
+    "electron-builder": "^19.27.7"
+  },
+  "build": {
+    "appId": "com.vishal.vimusic",
+    "productName": "ViMusic",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "**/*"
+    ],
+    "asar": false,
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ViMusic"
+    }
+  },
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win"
+  }
+}

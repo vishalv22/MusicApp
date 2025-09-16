@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Music Player</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="titlebar">
+        <div class="titlebar-drag-region">
+            <button id="slidePanelBtn" class="slide-panel-btn" title="Toggle Side Panel"><img src="icons/panel.png"></button>
+        </div>
+        <div class="titlebar-center">
+            <div class="titlebar-controls">
+                <div class="search-container">
+                    <input type="text" id="searchInput" placeholder="Search here..." class="titlebar-search">
+                    <img src="icons/search.png" class="search-icon">
+                </div>
+                <button id="refreshBtn" class="titlebar-btn" title="Refresh Music Library"><img src="icons/refresh.png"></button>
+                <button id="themeToggle" class="titlebar-btn" title="Toggle Theme"><img src="icons/night.png"></button>
+            </div>
+        </div>
+        <div class="window-controls">
+            <button class="window-control minimize" onclick="minimize()" title="Minimize">
+                <img src="icons/minimize.png">
+            </button>
+            <button class="window-control maximize" onclick="maximize()" title="Maximize">
+                <img src="icons/maximize.png">
+            </button>
+            <button class="window-control restore" onclick="maximize()" title="Restore" style="display: none;">
+                <img src="icons/restore.png">
+            </button>
+            <button class="window-control close" onclick="closeApp()" title="Close">
+                <img src="icons/close.png">
+            </button>
+        </div>
+    </div>
+
+    <div class="app">
+        <div class="main-content">
+            <div class="slide-panel" id="slidePanel">
+                <div class="slide-panel-content">
+                    <div class="dropdown-container">
+                        <button class="panel-action-btn" id="categorySelector">
+                            <span id="selectedCategory"><img src="icons/all-song.png"> All Songs</span>
+                            <img src="icons/shortby.png" class="dropdown-arrow">
+                        </button>
+                        <div class="dropdown-menu" id="categoryDropdown">
+                            <div class="dropdown-item" data-category="all"><img src="icons/all-song.png"> All Songs</div>
+                            <div class="dropdown-item" data-category="video"><img src="icons/video-songs.png"> Video Songs</div>
+                            <div class="dropdown-item" data-category="rated"><img src="icons/star-songs.png"> Rated Songs</div>
+                        </div>
+                    </div>
+                    <button class="panel-action-btn" id="viewStorageFolderBtn"><img src="icons/folder.png"> View in Folder</button>
+                    <button class="panel-action-btn" id="addMusicFilesBtn"><img src="icons/add.png"> Add Music Files</button>
+                    <div class="panel-divider"></div>
+                    <h3 class="panel-heading">Playlists</h3>
+                    <div class="playlist-input-container" id="playlistInputContainer" style="display: none;">
+                        <input type="text" id="playlistNameInput" class="playlist-name-input" placeholder="Enter playlist name...">
+                    </div>
+                    <div class="playlist-list" id="playlistList"></div>
+                    <button class="panel-action-btn" id="createPlaylistBtn"><img src="icons/add.png"> Create Playlist</button>
+                </div>
+            </div>
+            <div class="left-panel" id="leftPanel">
+                <div class="playlist-details-panel" id="playlistDetailsPanel" style="display: none;">
+                    <img src="icons/edit.png" class="playlist-bg-edit-icon" id="playlistBgEditIcon" title="Change background image">
+                    <div class="playlist-info">
+                        <div class="playlist-cover" id="playlistCover">
+                            <img src="icons/playlist.png" class="playlist-cover-img">
+                            <div class="playlist-cover-overlay">
+                                <img src="icons/edit.png" class="playlist-edit-icon">
+                            </div>
+                        </div>
+                        <div class="playlist-meta">
+                            <div class="playlist-title-container">
+                                <h2 class="playlist-title" id="playlistTitle">Playlist Name</h2>
+                                <img src="icons/edit.png" class="playlist-edit-name-icon" id="playlistEditIcon" title="Edit playlist name">
+                                <input type="text" class="playlist-title-input" id="playlistTitleInput" style="display: none;">
+                            </div>
+                            <p class="playlist-stats" id="playlistStats">0 songs</p>
+                            <p class="playlist-description" id="playlistDescription">No description</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="music-container">
+                    <div class="music-header">
+                        <div class="header-number">#</div>
+                        <div class="header-cover"></div>
+                        <div class="header-title">Title</div>
+                        <div class="header-rating">Rating</div>
+                        <div class="header-badge">
+                            <button class="header-btn" id="sortBtn" title="Sort Options"><img src="icons/shortby.png"></button>
+                            <div class="sort-menu" id="sortMenu">
+                                <div class="sort-option" data-sort="title">Sort by Title</div>
+                                <div class="sort-option" data-sort="artist">Sort by Artist</div>
+                                <div class="sort-option" data-sort="rating">Sort by Rating</div>
+                                <div class="sort-option" data-sort="recent">Recently Added</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="music-list" id="musicList">
+                        <div id="songs"></div>
+                    </div>
+                </div>
+                
+                <div class="context-menu" id="contextMenu">
+                    <div class="menu-item" id="addMusic">Add Music</div>
+                    <div class="menu-item" id="addVideo">Add Video</div>
+                    <div class="menu-item" id="addLyrics">Add Lyrics</div>
+                    <div class="menu-item" id="viewFolder">View Folder</div>
+                </div>
+                
+                <div class="context-menu" id="songContextMenu">
+                    <div class="menu-item submenu-parent" id="addToPlaylist">
+                        <img src="icons/add-to-playlist.png" class="menu-icon">Add to Playlist
+                        <img src="icons/right-arrow.png" class="submenu-arrow">
+                        <div class="submenu" id="playlistSubmenu"></div>
+                    </div>
+                    <div class="menu-item" id="addToQueue"><img src="icons/queue.png" class="menu-icon">Add to Queue</div>
+                    <div class="menu-item" id="enableSelection"><img src="icons/ticked.png" class="menu-icon">Select Multiple</div>
+                    <div class="menu-item" id="removeFromPlaylist"><img src="icons/delete.png" class="menu-icon">Remove from Playlist</div>
+                    <div class="menu-item" id="removeLyrics"><img src="icons/remove-lyrics.png" class="menu-icon">Remove Lyrics</div>
+                    <div class="menu-item" id="removeVideo"><img src="icons/remove-video.png" class="menu-icon">Remove Video</div>
+                    <div class="menu-item" id="viewInFolder"><img src="icons/folder2.png" class="menu-icon">View in Folder</div>
+                    <div class="menu-item" id="deleteSong"><img src="icons/delete.png" class="menu-icon">Delete Song</div>
+                </div>
+                
+                <div class="context-menu" id="lyricsContextMenu">
+                    <div class="menu-item" id="pasteLyrics">Paste Synced Lyrics</div>
+                </div>
+                
+                <div class="context-menu" id="playlistContextMenu">
+                    <div class="menu-item" id="editPlaylist">Edit Playlist</div>
+                    <div class="menu-item submenu-parent" id="mergePlaylist">
+                        Merge With
+                        <img src="icons/right-arrow.png" class="submenu-arrow">
+                        <div class="submenu" id="mergeSubmenu"></div>
+                    </div>
+                    <div class="menu-item" id="pinPlaylist">Pin Playlist</div>
+                    <div class="menu-item" id="deletePlaylist">Delete Playlist</div>
+                </div>
+                
+                <input type="file" id="musicFileInput" multiple accept="audio/*" style="display: none;">
+                <input type="file" id="videoFileInput" multiple accept="video/*" style="display: none;">
+                <input type="file" id="lyricsFileInput" multiple accept=".lrc" style="display: none;">
+            </div>
+            
+            <div class="resizer" id="resizer"></div>
+            
+            <div class="right-panel" id="rightPanel">
+                <div class="details-panel">
+                    <div class="album-cover" id="albumCover">
+                        <div class="cover-placeholder">🎵</div>
+                    </div>
+                    <div class="video-player" id="videoPlayer" style="display: none;">
+                        <video id="videoElement" preload="metadata">
+                            Your browser does not support the video tag.
+                        </video>
+                    </div>
+                    <div class="song-details">
+                        <h3 id="detailTitle">Select a Song</h3>
+                        <p id="detailArtist">Unknown Artist</p>
+                        <div class="song-info">
+                            <span id="detailDuration">--:--</span>
+                            <span id="detailFormat">--</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="lyrics-header">
+                    <div class="lyrics-controls" style="margin-left: auto;">
+                        <button id="lyricsToggleBtn" class="theme-btn active" title="Toggle Lyrics"><img src="icons/lyrics.png"></button>
+                        <button id="lyricsFontBtn" class="theme-btn" title="Lyrics Font Settings" style="display: none;"><img src="icons/font.png"></button>
+                        <button id="offsetToggleBtn" class="theme-btn" title="Adjust Lyrics Timing"><img src="icons/clock.png"></button>
+                        <button id="videoBtn" class="theme-btn" title="Toggle Video Player"><img src="icons/video.png"></button>
+                        <button id="floatLyricsBtn" class="float-btn" title="Open Floating Lyrics Window"><img src="icons/floating.png"></button>
+                    </div>
+                </div>
+                <div id="lyrics" class="lyrics"></div>
+
+                <div class="lyrics-timing-controls" id="lyricsTimingControls" style="display: none;">
+                    <button class="timing-btn" id="timingBackward">-500ms</button>
+                    <span class="timing-offset" id="timingOffset">Offset: 0ms</span>
+                    <button class="timing-btn" id="timingForward">+500ms</button>
+                    <button class="timing-btn" id="timingSave" style="background: #27ae60;">✓</button>
+                </div>
+                
+                <div class="lyrics-font-controls" id="lyricsFontControls" style="display: none;">
+                    <button class="timing-btn" id="fontDecrease">-</button>
+                    <span class="timing-offset" id="fontSizeDisplay">Size: 16px</span>
+                    <button class="timing-btn" id="fontIncrease">+</button>
+                    <button class="timing-btn" id="fontSave" style="background: #27ae60;">✓</button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="bottom-controls">
+            <div class="progress-container">
+                <div class="progress-bar" id="progressBar" title="Seek to position">
+                    <div class="progress-fill" id="progressFill"></div>
+                    <div class="progress-handle" id="progressHandle"></div>
+                </div>
+            </div>
+            
+            <div class="controls-row">
+                <div class="player-controls">
+                    <button id="shuffleBtn" class="mode-btn" title="Shuffle"><img src="icons/shuffle.png"></button>
+                    <button id="prevBtn" title="Previous Song"><img src="icons/previous.png"></button>
+                    <button id="playPauseBtn" title="Play/Pause"><img src="icons/play.png"></button>
+                    <button id="nextBtn" title="Next Song"><img src="icons/next.png"></button>
+                    <button id="repeatBtn" class="mode-btn" title="Repeat Mode"><img src="icons/repeat_all.png"></button>
+                    <div class="star-rating-current" id="starRatingCurrent"></div>
+                </div>
+                
+                <div class="time-display">
+                    <span id="time">00:00 / 00:00</span>
+                    <div class="signature">by Vishal</div>
+                </div>
+                
+                <div class="volume-container">
+                    <div class="volume-icon"><img src="icons/100.png" id="volumeIcon"></div>
+                    <div class="volume-bar" id="volumeBar" title="Adjust volume (scroll wheel supported)">
+                        <div class="volume-fill" id="volumeFill"></div>
+                        <div class="volume-handle" id="volumeHandle"></div>
+                    </div>
+                    <span id="volumePercent">100%</span>
+                </div>
+            </div>
+        </div>
+        
+        <audio id="audio"></audio>
+    </div>
+
+
+    <script src="app.js"></script>
+</body>
+</html>
