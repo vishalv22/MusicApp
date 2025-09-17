@@ -89,9 +89,12 @@ function createWindow() {
         }
     });
     
-    // Enable zoom shortcuts
+    // Enable zoom shortcuts with throttling
+    let zoomTimeout = null;
     mainWindow.webContents.on('before-input-event', (event, input) => {
         if (input.control && input.type === 'keyDown') {
+            if (zoomTimeout) return; // Throttle zoom operations
+            
             const currentZoom = mainWindow.webContents.getZoomFactor();
             
             if (input.key === '=' || input.key === '+') {
@@ -103,6 +106,11 @@ function createWindow() {
             } else if (input.key === '0') {
                 mainWindow.webContents.setZoomFactor(1.0);
             }
+            
+            // Throttle zoom operations
+            zoomTimeout = setTimeout(() => {
+                zoomTimeout = null;
+            }, 100);
         }
     });
     
@@ -123,9 +131,8 @@ ipcMain.on('window-minimize', () => mainWindow.minimize());
 ipcMain.on('window-maximize', () => mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize());
 ipcMain.on('window-close', () => mainWindow.close());
 
-// Get user data directory
+// Get user data directory - moved to top to avoid lazy loading
 const getUserDataPath = () => {
-    const { app } = require('electron');
     return path.join(app.getPath('userData'), 'storage');
 };
 
@@ -420,10 +427,12 @@ ipcMain.on('create-floating-lyrics', (event) => {
         }
     });
     
-    // Force always on top periodically
-    setInterval(() => {
+    // Force always on top periodically with cleanup
+    const alwaysOnTopInterval = setInterval(() => {
         if (floatingWindow && !floatingWindow.isDestroyed()) {
             floatingWindow.setAlwaysOnTop(true, 'screen-saver');
+        } else {
+            clearInterval(alwaysOnTopInterval);
         }
     }, 2000);
     

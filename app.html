@@ -10,6 +10,7 @@
     <div class="titlebar">
         <div class="titlebar-drag-region">
             <button id="slidePanelBtn" class="slide-panel-btn" title="Toggle Side Panel"><img src="icons/panel.png"></button>
+            <button id="settingsBtn" class="slide-panel-btn" title="Settings" style="margin-left: 4px;"><img src="icons/setting.png"></button>
         </div>
         <div class="titlebar-center">
             <div class="titlebar-controls">
@@ -64,6 +65,203 @@
                 </div>
             </div>
             <div class="left-panel" id="leftPanel">
+                <div class="settings-panel" id="settingsPanel" style="display: none;">
+                    <div class="settings-header">
+                        <div class="settings-tabs">
+                            <button class="settings-tab active" data-tab="basics">Basics</button>
+                            <button class="settings-tab" data-tab="equalizer">Equalizer</button>
+                            <button class="settings-tab" data-tab="appearance">Appearance</button>
+                            <button class="settings-tab" data-tab="features">Features and Use</button>
+                            <button class="settings-tab" data-tab="about">About</button>
+                        </div>
+                    </div>
+                    <div class="settings-content">
+                        <div class="settings-tab-content active" id="basics-content">
+                            <h3>Playback Settings</h3>
+                            <div class="setting-item">
+                                <label for="crossfadeSlider">Crossfade duration</label>
+                                <div class="slider-container">
+                                    <input type="range" id="crossfadeSlider" min="0" max="10" value="0" step="0.1">
+                                    <span id="crossfadeValue">0 sec</span>
+                                </div>
+                            </div>
+                            <div class="setting-item">
+                                <label for="gaplessToggle">Gapless Playback</label>
+                                <input type="checkbox" id="gaplessToggle" class="toggle-switch">
+                            </div>
+                            
+                            <h3>Audio Settings</h3>
+                            <div class="setting-item">
+                                <label>Output device</label>
+                                <div class="custom-dropdown" id="outputDevice">
+                                    <div class="dropdown-selected">Default</div>
+                                    <div class="dropdown-options">
+                                        <div class="dropdown-option" data-value="default">Default</div>
+                                        <div class="dropdown-option" data-value="speakers">Speakers</div>
+                                        <div class="dropdown-option" data-value="headphones">Headphones</div>
+                                        <div class="dropdown-option" data-value="bluetooth">Bluetooth devices</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="setting-item">
+                                <label>Audio quality</label>
+                                <div class="custom-dropdown" id="audioQuality">
+                                    <div class="dropdown-selected">High</div>
+                                    <div class="dropdown-options">
+                                        <div class="dropdown-option" data-value="low">Low</div>
+                                        <div class="dropdown-option" data-value="medium">Medium</div>
+                                        <div class="dropdown-option" data-value="high">High</div>
+                                        <div class="dropdown-option" data-value="lossless">Lossless</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="setting-item">
+                                <label for="volumeNormalization">Volume normalization</label>
+                                <input type="checkbox" id="volumeNormalization" class="toggle-switch">
+                            </div>
+                            
+                            <h3>General Settings</h3>
+                            <div class="setting-item">
+                                <label>Language</label>
+                                <div class="custom-dropdown" id="language">
+                                    <div class="dropdown-selected">English</div>
+                                    <div class="dropdown-options">
+                                        <div class="dropdown-option" data-value="english">English</div>
+                                        <div class="dropdown-option" data-value="hindi">Hindi</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="settings-tab-content" id="equalizer-content">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                                <h3 style="margin: 0; border-bottom: none; padding-bottom: 0;">Equalizer</h3>
+                                <input type="checkbox" id="equalizerToggle" class="toggle-switch" checked>
+                            </div>
+                            <div class="equalizer-controls">
+                                <div class="equalizer-presets">
+                                    <div class="custom-dropdown" id="equalizerPresets">
+                                        <div class="dropdown-selected">Flat</div>
+                                        <div class="dropdown-options">
+                                            <div class="dropdown-option" data-value="flat">Flat</div>
+                                            <div class="dropdown-option" data-value="rock">Rock</div>
+                                            <div class="dropdown-option" data-value="pop">Pop</div>
+                                            <div class="dropdown-option" data-value="jazz">Jazz</div>
+                                            <div class="dropdown-option" data-value="classical">Classical</div>
+                                            <div class="dropdown-option" data-value="electronic">Electronic</div>
+                                            <div class="dropdown-option" data-value="bass-boost">Bass Boost</div>
+                                            <div class="dropdown-option" data-value="vocal">Vocal</div>
+                                        </div>
+                                    </div>
+                                    <button id="resetEqualizer" class="reset-btn">Reset</button>
+                                </div>
+                                <div class="equalizer-sliders" id="equalizerSliders">
+                                    <svg class="eq-graph" id="eqGraph" viewBox="0 0 100 100" preserveAspectRatio="none">
+                                        <defs>
+                                            <linearGradient id="eqGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                                                <stop offset="0%" stop-color="rgba(136, 136, 136, 0.4)"/>
+                                                <stop offset="50%" stop-color="rgba(136, 136, 136, 0.2)"/>
+                                                <stop offset="100%" stop-color="rgba(136, 136, 136, 0.4)"/>
+                                            </linearGradient>
+                                            <linearGradient id="eqGradientLight" x1="0%" y1="0%" x2="0%" y2="100%">
+                                                <stop offset="0%" stop-color="rgba(102, 102, 102, 0.4)"/>
+                                                <stop offset="50%" stop-color="rgba(102, 102, 102, 0.2)"/>
+                                                <stop offset="100%" stop-color="rgba(102, 102, 102, 0.4)"/>
+                                            </linearGradient>
+                                        </defs>
+                                        <path id="eqPath" stroke="#888" stroke-width="0.5" fill="url(#eqGradient)"/>
+                                    </svg>
+                                    <div class="eq-slider-row">
+                                        <label class="eq-label">32Hz</label>
+                                        <input type="range" class="eq-slider" data-freq="32" min="-12" max="12" value="0" step="0.5">
+                                        <span class="eq-value">0dB</span>
+                                    </div>
+                                    <div class="eq-slider-row">
+                                        <label class="eq-label">64Hz</label>
+                                        <input type="range" class="eq-slider" data-freq="64" min="-12" max="12" value="0" step="0.5">
+                                        <span class="eq-value">0dB</span>
+                                    </div>
+                                    <div class="eq-slider-row">
+                                        <label class="eq-label">125Hz</label>
+                                        <input type="range" class="eq-slider" data-freq="125" min="-12" max="12" value="0" step="0.5">
+                                        <span class="eq-value">0dB</span>
+                                    </div>
+                                    <div class="eq-slider-row">
+                                        <label class="eq-label">250Hz</label>
+                                        <input type="range" class="eq-slider" data-freq="250" min="-12" max="12" value="0" step="0.5">
+                                        <span class="eq-value">0dB</span>
+                                    </div>
+                                    <div class="eq-slider-row">
+                                        <label class="eq-label">500Hz</label>
+                                        <input type="range" class="eq-slider" data-freq="500" min="-12" max="12" value="0" step="0.5">
+                                        <span class="eq-value">0dB</span>
+                                    </div>
+                                    <div class="eq-slider-row">
+                                        <label class="eq-label">1kHz</label>
+                                        <input type="range" class="eq-slider" data-freq="1000" min="-12" max="12" value="0" step="0.5">
+                                        <span class="eq-value">0dB</span>
+                                    </div>
+                                    <div class="eq-slider-row">
+                                        <label class="eq-label">2kHz</label>
+                                        <input type="range" class="eq-slider" data-freq="2000" min="-12" max="12" value="0" step="0.5">
+                                        <span class="eq-value">0dB</span>
+                                    </div>
+                                    <div class="eq-slider-row">
+                                        <label class="eq-label">4kHz</label>
+                                        <input type="range" class="eq-slider" data-freq="4000" min="-12" max="12" value="0" step="0.5">
+                                        <span class="eq-value">0dB</span>
+                                    </div>
+                                    <div class="eq-slider-row">
+                                        <label class="eq-label">8kHz</label>
+                                        <input type="range" class="eq-slider" data-freq="8000" min="-12" max="12" value="0" step="0.5">
+                                        <span class="eq-value">0dB</span>
+                                    </div>
+                                    <div class="eq-slider-row">
+                                        <label class="eq-label">10kHz</label>
+                                        <input type="range" class="eq-slider" data-freq="10000" min="-12" max="12" value="0" step="0.5">
+                                        <span class="eq-value">0dB</span>
+                                    </div>
+                                    <div class="eq-slider-row">
+                                        <label class="eq-label">12kHz</label>
+                                        <input type="range" class="eq-slider" data-freq="12000" min="-12" max="12" value="0" step="0.5">
+                                        <span class="eq-value">0dB</span>
+                                    </div>
+                                    <div class="eq-slider-row">
+                                        <label class="eq-label">14kHz</label>
+                                        <input type="range" class="eq-slider" data-freq="14000" min="-12" max="12" value="0" step="0.5">
+                                        <span class="eq-value">0dB</span>
+                                    </div>
+                                    <div class="eq-slider-row">
+                                        <label class="eq-label">16kHz</label>
+                                        <input type="range" class="eq-slider" data-freq="16000" min="-12" max="12" value="0" step="0.5">
+                                        <span class="eq-value">0dB</span>
+                                    </div>
+                                    <div class="eq-slider-row">
+                                        <label class="eq-label">18kHz</label>
+                                        <input type="range" class="eq-slider" data-freq="18000" min="-12" max="12" value="0" step="0.5">
+                                        <span class="eq-value">0dB</span>
+                                    </div>
+                                    <div class="eq-slider-row">
+                                        <label class="eq-label">20kHz</label>
+                                        <input type="range" class="eq-slider" data-freq="20000" min="-12" max="12" value="0" step="0.5">
+                                        <span class="eq-value">0dB</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="settings-tab-content" id="appearance-content">
+                            <h3>Appearance</h3>
+                            <p>Theme and appearance settings will go here.</p>
+                        </div>
+                        <div class="settings-tab-content" id="features-content">
+                            <h3>Features and Use</h3>
+                            <p>Feature configuration and usage settings will go here.</p>
+                        </div>
+                        <div class="settings-tab-content" id="about-content">
+                            <h3>About</h3>
+                            <p>Application information and credits will go here.</p>
+                        </div>
+                    </div>
+                </div>
                 <div class="playlist-details-panel" id="playlistDetailsPanel" style="display: none;">
                     <img src="icons/edit.png" class="playlist-bg-edit-icon" id="playlistBgEditIcon" title="Change background image">
                     <div class="playlist-info">
