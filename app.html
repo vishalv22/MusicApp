@@ -49,12 +49,14 @@
                         </button>
                         <div class="dropdown-menu" id="categoryDropdown">
                             <div class="dropdown-item" data-category="all"><img src="icons/all-song.png"> All Songs</div>
+                            <div class="dropdown-item" data-category="recent"><img src="icons/clock.png"> Recently Added</div>
                             <div class="dropdown-item" data-category="video"><img src="icons/video-songs.png"> Video Songs</div>
                             <div class="dropdown-item" data-category="rated"><img src="icons/star-songs.png"> Rated Songs</div>
                         </div>
                     </div>
                     <button class="panel-action-btn" id="viewStorageFolderBtn"><img src="icons/folder.png"> View in Folder</button>
                     <button class="panel-action-btn" id="addMusicFilesBtn"><img src="icons/add.png"> Add Music Files</button>
+                    <button class="panel-action-btn" id="downloadMusicBtn"><img src="icons/download.png"> Download Music</button>
                     <div class="panel-divider"></div>
                     <h3 class="panel-heading">Playlists</h3>
                     <div class="playlist-input-container" id="playlistInputContainer" style="display: none;">
@@ -282,7 +284,7 @@
                         </div>
                     </div>
                 </div>
-                <div class="music-container">
+                <div class="music-container" id="musicContainer">
                     <div class="music-header">
                         <div class="header-number">#</div>
                         <div class="header-cover"></div>
@@ -300,6 +302,14 @@
                     </div>
                     <div class="music-list" id="musicList">
                         <div id="songs"></div>
+                    </div>
+                </div>
+                
+                <div class="download-panel" id="downloadPanel" style="display: none;">
+                    <iframe id="spotdlFrame" src="" style="width: 100%; height: 100%; border: none; display: none;"></iframe>
+                    <div class="download-loading" id="downloadLoading" style="display: flex; align-items: center; justify-content: center; height: 100%; flex-direction: column;">
+                        <p>Starting SpotDL server...</p>
+                        <div style="margin-top: 10px; font-size: 12px; color: #666;">This may take a few moments</div>
                     </div>
                 </div>
                 

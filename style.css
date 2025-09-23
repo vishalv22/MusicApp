@@ -39,6 +39,31 @@ body {
     user-select: none;
 }
 
+/* Global scrollbar styles */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #333;
+    border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #444;
+}
+
+/* Firefox scrollbar */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: #333 transparent;
+}
+
 body.light-theme {
     --titlebar-bg: #F6F6F6;
     --titlebar-fg: #111111;
@@ -361,6 +386,7 @@ body.light-theme .volume-icon img {
     flex: 1;
     display: flex;
     overflow: hidden;
+    position: relative;
 }
 
 .left-panel {
@@ -368,6 +394,10 @@ body.light-theme .volume-icon img {
     padding: 0 5px 20px 5px;
     border-right: 1px solid #333;
     overflow-y: auto;
+}
+
+.left-panel.download-active {
+    padding: 0;
 }
 
 .left-panel::-webkit-scrollbar {
@@ -724,6 +754,9 @@ body.light-theme .panel-action-btn:hover {
     height: 8px !important;
     filter: brightness(0) invert(1);
     transition: transform 0.3s;
+    cursor: pointer;
+    padding: 10px;
+    box-sizing: content-box;
 }
 
 .dropdown-menu {
@@ -3154,4 +3187,54 @@ body.light-theme .eq-slider::-webkit-slider-thumb {
 
 body.light-theme .eq-value {
     color: #666;
+}
+
+/* Download Panel Styles */
+.download-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: transparent;
+    height: 100%;
+}
+
+#spotdlFrame {
+    width: 100%;
+    height: 100%;
+    border: none;
+    border-radius: 8px;
+    background: #fff;
+    flex: 1;
+    min-height: 0;
+    zoom: 0.78;
+    margin-bottom: -10px;
+    pointer-events: auto;
+    -webkit-user-select: text;
+    user-select: text;
+}
+
+.download-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    flex-direction: column;
+    color: #888;
+    font-size: 14px;
+    gap: 10px;
+}
+
+.download-loading p {
+    margin: 0;
+    text-align: center;
+}
+
+body.light-theme .download-loading {
+    color: #666;
+}
+
+body.light-theme #spotdlFrame {
+    background: #fff;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
 }

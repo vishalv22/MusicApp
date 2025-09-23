@@ -30,6 +30,7 @@ class MusicPlayer {
         this.crossfadeInterval = null;
         this.originalVolume = 1;
         this.nextAudio = null;
+        this.spotdlServerRunning = false;
         
         // Audio context for equalizer
         this.audioContext = null;
@@ -329,7 +330,6 @@ class MusicPlayer {
             this.songs[songIndex].rating = rating;
         }
         this.saveRatings();
-        this.displayFilteredSongs();
         
         // Update current song rating if it's the same song
         if (songIndex === this.currentSongIndex) {
@@ -391,6 +391,10 @@ class MusicPlayer {
         document.querySelectorAll('.song-item').forEach((item, i) => {
             item.classList.toggle('active', i === index);
         });
+        
+        // Stop any playing video to prevent dual audio
+        this.videoElement.pause();
+        this.videoElement.src = '';
         
         // Always load music first with maximum quality
         this.audio.src = `file:///${song.path.replace(/\\/g, '/')}`;
@@ -495,7 +499,7 @@ class MusicPlayer {
                         <ul class="instruction-list">
                             <li>Drop .lrc file here</li>
                             <li>Right-click and paste synced lyrics</li>
-                            <li>Ctrl+V to paste lyrics directly</li>
+                            <li><a href="#" onclick="player.searchMusicOnline()" style="color: #4a9eff; text-decoration: none;">Search for Lyrics Online</a></li>
                         </ul>
                         <p class="format-hint">Synced lyrics format: [00:12.34]Lyric text here</p>
                     </div>
@@ -545,7 +549,7 @@ class MusicPlayer {
             if (match) {
                 const time = parseInt(match[1], 10) * 60 + parseInt(match[2], 10) + parseInt(match[3], 10) / 100;
                 const lyric = match[4].trim();
-                if (lyric) this.lyrics.push({ time, text: lyric });
+                this.lyrics.push({ time, text: lyric || ' ♪ ♪ ♪' });
             }
         });
         
@@ -667,10 +671,9 @@ class MusicPlayer {
             const prevIndex = this.getPreviousShuffleSong();
             this.selectSong(prevIndex);
         } else {
-            if (this.currentSongIndex > 0) {
-                this.selectSong(this.currentSongIndex - 1);
-            } else {
-                this.selectSong(this.songs.length - 1);
+            const prevIndex = this.getPreviousSongInContext();
+            if (prevIndex !== null) {
+                this.selectSong(prevIndex);
             }
         }
     }
@@ -695,18 +698,12 @@ class MusicPlayer {
         if (this.shuffleMode) {
             nextIndex = this.getNextShuffleSong();
         } else {
-            if (this.currentSongIndex < this.songs.length - 1) {
-                nextIndex = this.currentSongIndex + 1;
-            } else {
-                if (this.repeatMode === 'all') {
-                    nextIndex = 0;
-                } else {
-                    return; // Stop at end if no repeat
-                }
-            }
+            nextIndex = this.getNextSongInContext();
         }
         
-        this.selectSong(nextIndex);
+        if (nextIndex !== null) {
+            this.selectSong(nextIndex);
+        }
     }
 
     updateTime() {
@@ -1402,7 +1399,7 @@ class MusicPlayer {
                                 <ul class="instruction-list">
                                     <li>Drop .lrc file here</li>
                                     <li>Right-click and paste synced lyrics</li>
-                                    <li>Ctrl+V to paste lyrics directly</li>
+                                    <li><a href="#" onclick="player.searchMusicOnline()" style="color: #4a9eff; text-decoration: none;">Search Music Online</a></li>
                                 </ul>
                                 <p class="format-hint">Synced lyrics format: [00:12.34]Lyric text here</p>
                             </div>
@@ -1494,14 +1491,18 @@ class MusicPlayer {
         try {
             await ipcRenderer.invoke('add-files', fileArray.map(f => f.path), type);
             
-            // Mark newly added files with current timestamp
-            const currentTime = Date.now();
-            const newFileNames = fileArray.map(f => f.name || f.path.split(/[\\/]/).pop());
-            
             this.showNotification(`Added ${fileArray.length} ${type} files successfully`, 'success');
-            await this.loadMusic();
             
-
+            // Switch to All Songs and refresh quickly for music files
+            if (type === 'music' || type === 'video') {
+                this.currentPlaylist = null;
+                this.hidePlaylistDetails();
+                this.searchInput.value = '';
+                await this.loadMusic();
+                this.selectCategory('all', 'All Songs');
+            } else {
+                await this.loadMusic();
+            }
         } catch (error) {
             this.showNotification(`Failed to add ${type} files`, 'error');
         }
@@ -1547,7 +1548,13 @@ class MusicPlayer {
             if (promises.length > 0) {
                 await Promise.all(promises);
                 this.showNotification(`Successfully added ${totalFiles} files`, 'success');
-                this.loadMusic();
+                
+                // Switch to All Songs and refresh quickly
+                this.currentPlaylist = null;
+                this.hidePlaylistDetails();
+                this.searchInput.value = '';
+                await this.loadMusic();
+                this.selectCategory('all', 'All Songs');
             }
         } catch (error) {
             this.showNotification('Failed to add some files', 'error');
@@ -1785,6 +1792,13 @@ class MusicPlayer {
         this.isPlaying = false;
         this.playPauseImg.src = 'icons/play.png';
         
+        // Reload video source
+        if (currentSong.isVideo) {
+            this.videoElement.src = `file:///${currentSong.path.replace(/\\/g, '/')}`;
+        } else if (currentSong.attachedVideo) {
+            this.videoElement.src = `file:///${currentSong.attachedVideo.path.replace(/\\/g, '/')}`;
+        }
+        
         // Setup video
         this.videoElement.currentTime = currentTime;
         this.showVideoPlayer();
@@ -1811,8 +1825,10 @@ class MusicPlayer {
         const wasPlaying = this.isPlaying;
         const currentTime = this.videoElement.currentTime;
         
-        // Stop video completely
+        // Stop video completely and clear source
         this.videoElement.pause();
+        this.videoElement.src = '';
+        this.videoElement.load();
         this.isPlaying = false;
         this.playPauseImg.src = 'icons/play.png';
         
@@ -1909,6 +1925,7 @@ class MusicPlayer {
         
         document.getElementById('viewStorageFolderBtn').onclick = () => this.viewStorageFolder();
         document.getElementById('addMusicFilesBtn').onclick = () => this.addMusicFiles();
+        document.getElementById('downloadMusicBtn').onclick = () => this.showDownloadInterface();
         
         // Auto-hide dropdown on mouse leave
         const dropdownContainer = document.querySelector('.dropdown-container');
@@ -2314,18 +2331,28 @@ class MusicPlayer {
         }
     }
     
+    getPlaylistSongs(playlistName) {
+        const playlistData = this.playlists[playlistName];
+        const songs = Array.isArray(playlistData) ? playlistData : (playlistData?.songs || []);
+        
+        return songs.reduce((acc, songName) => {
+            const song = this.songs.find(s => s.name === songName);
+            if (song) acc.push(song);
+            return acc;
+        }, []);
+    }
+    
     loadPlaylist(name) {
         if (!this.songs || this.songs.length === 0) {
             setTimeout(() => this.loadPlaylist(name), 100);
             return;
         }
         
-        // Close settings panel if open
-        if (this.settingsPanel.style.display === 'block') {
-            this.settingsPanel.style.display = 'none';
-            this.musicContainer.style.display = 'flex';
-            this.settingsBtn.classList.remove('active');
-        }
+        this.showMusicView();
+        this.settingsBtn.classList.remove('active');
+        
+        // Clear search input when switching playlists
+        this.searchInput.value = '';
         
         this.currentPlaylist = name;
         const playlistData = this.playlists[name];
@@ -2346,19 +2373,16 @@ class MusicPlayer {
                 </div>
             `;
         } else {
-            // Use reduce for better performance than map().filter()
-            const playlistSongs = songs.reduce((acc, songName) => {
-                const song = this.songs.find(s => s.name === songName);
-                if (song) acc.push(song);
-                return acc;
-            }, []);
-            
+            const playlistSongs = this.getPlaylistSongs(name);
             this.filteredSongs = playlistSongs;
             this.displayFilteredSongs();
         }
     }
     
     showAllSongs() {
+        // Clear search input when showing all songs
+        this.searchInput.value = '';
+        
         this.currentPlaylist = null;
         this.hidePlaylistDetails();
         this.displaySongs();
@@ -2477,12 +2501,11 @@ class MusicPlayer {
         // Close dropdown and update UI immediately
         document.getElementById('categoryDropdown').style.display = 'none';
         
-        // Close settings panel if open
-        if (this.settingsPanel.style.display === 'block') {
-            this.settingsPanel.style.display = 'none';
-            this.musicContainer.style.display = 'flex';
-            this.settingsBtn.classList.remove('active');
-        }
+        this.showMusicView();
+        this.settingsBtn.classList.remove('active');
+        
+        // Clear search input when switching categories
+        this.searchInput.value = '';
         
         // Track current category
         this.currentCategory = category;
@@ -2525,6 +2548,16 @@ class MusicPlayer {
                     this.displayFilteredSongs();
                     this.showNotification('Showing rated songs only', 'info');
                     break;
+                case 'recent':
+                    // Get recently added songs (top 50)
+                    const recentSongs = [...this.songs]
+                        .filter(song => song.dateAdded)
+                        .sort((a, b) => new Date(b.dateAdded) - new Date(a.dateAdded))
+                        .slice(0, 50);
+                    this.filteredSongs = recentSongs;
+                    this.displayFilteredSongs();
+                    this.showNotification(`Showing ${recentSongs.length} recently added songs`, 'info');
+                    break;
 
             }
             
@@ -2549,6 +2582,73 @@ class MusicPlayer {
         } catch (error) {
             this.showNotification('Failed to add music files', 'error');
         }
+    }
+    
+    async showDownloadInterface() {
+        this.hideAllPanels();
+        document.getElementById('downloadPanel').style.display = 'block';
+        this.leftPanel.classList.add('download-active');
+        this.currentView = 'download';
+        
+        const frame = document.getElementById('spotdlFrame');
+        const loading = document.getElementById('downloadLoading');
+        
+        if (!this.spotdlServerRunning) {
+            try {
+                loading.style.display = 'flex';
+                frame.style.display = 'none';
+                
+                const success = await ipcRenderer.invoke('start-spotdl-server');
+                
+                if (success) {
+                    setTimeout(() => {
+                        frame.src = 'http://127.0.0.1:8800';
+                        frame.style.display = 'block';
+                        loading.style.display = 'none';
+                        this.spotdlServerRunning = true;
+                        
+                        // Fix iframe input handling
+                        frame.onload = () => {
+                            try {
+                                frame.contentWindow.focus();
+                            } catch (e) {
+                                // Cross-origin, ignore
+                            }
+                        };
+                        
+                        // Ensure iframe can receive focus
+                        frame.onclick = () => {
+                            try {
+                                frame.contentWindow.focus();
+                            } catch (e) {
+                                // Cross-origin, ignore
+                            }
+                        };
+                    }, 3000);
+                } else {
+                    loading.innerHTML = '<p>Failed to start SpotDL server</p><p style="font-size: 12px; color: #666;">Make sure Python and SpotDL are installed</p>';
+                }
+            } catch (error) {
+                loading.innerHTML = '<p>Error starting SpotDL server</p>';
+            }
+        } else {
+            frame.style.display = 'block';
+            loading.style.display = 'none';
+        }
+    }
+    
+    hideAllPanels() {
+        document.getElementById('musicContainer').style.display = 'none';
+        document.getElementById('downloadPanel').style.display = 'none';
+        document.getElementById('settingsPanel').style.display = 'none';
+        this.hidePlaylistDetails();
+    }
+    
+    showMusicView() {
+        this.hideAllPanels();
+        document.getElementById('musicContainer').style.display = 'flex';
+        this.leftPanel.classList.remove('download-active');
+        this.currentView = 'music';
     }
     
     updateSelectionUI() {
@@ -3081,10 +3181,14 @@ class MusicPlayer {
 
     
     filterSongs(query) {
+        // Get the current song list to search within
+        const songsToSearch = this.currentPlaylist ? 
+            this.getPlaylistSongs(this.currentPlaylist) : this.songs;
+        
         if (!query || typeof query !== 'string' || !query.trim()) {
-            this.filteredSongs = [...this.songs];
+            this.filteredSongs = [...songsToSearch];
         } else {
-            const results = this.songs.map(song => ({
+            const results = songsToSearch.map(song => ({
                 song,
                 score: this.calculateRelevanceScore(song, query)
             })).filter(item => item.score > 0.3)
@@ -3100,18 +3204,20 @@ class MusicPlayer {
         const cleanQuery = this.cleanSearchText(query);
         const fields = [
             { text: this.cleanSearchText(song.title), weight: 0.5 },
-            { text: this.cleanSearchText(song.artist), weight: 0.3 },
+            { text: this.cleanSearchText(song.artist), weight: 0.4 },
             { text: this.cleanSearchText(song.album), weight: 0.2 }
         ];
         
-        let maxScore = 0;
+        let totalScore = 0;
         
         for (const field of fields) {
-            const score = this.advancedMatch(field.text, cleanQuery) * field.weight;
-            maxScore = Math.max(maxScore, score);
+            if (field.text) {
+                const score = this.advancedMatch(field.text, cleanQuery) * field.weight;
+                totalScore += score;
+            }
         }
         
-        return maxScore;
+        return totalScore;
     }
     
     cleanSearchText(text) {
@@ -3129,18 +3235,29 @@ class MusicPlayer {
         if (text === query) return 1.0;
         if (text.includes(query)) return 0.9;
         
+        // Check if query matches start of text
+        if (text.startsWith(query)) return 0.85;
+        
+        // Word boundary matching
+        const words = text.split(' ');
+        for (const word of words) {
+            if (word === query) return 0.8;
+            if (word.startsWith(query)) return 0.7;
+            if (word.includes(query)) return 0.6;
+        }
+        
         // Jaro-Winkler similarity
         const jaroScore = this.jaroWinkler(text, query);
-        if (jaroScore > 0.8) return jaroScore;
+        if (jaroScore > 0.7) return jaroScore;
         
         // N-gram similarity
         const ngramScore = this.ngramSimilarity(text, query, 2);
-        if (ngramScore > 0.6) return ngramScore * 0.8;
+        if (ngramScore > 0.5) return ngramScore * 0.7;
         
-        // Word-level matching with phonetic similarity
+        // Word-level matching
         const wordScore = this.wordLevelMatch(text, query);
         
-        return Math.max(jaroScore, ngramScore * 0.8, wordScore);
+        return Math.max(jaroScore, ngramScore * 0.7, wordScore);
     }
     
     jaroWinkler(s1, s2) {
@@ -3431,13 +3548,13 @@ class MusicPlayer {
     }
     
     generateShuffleQueue() {
-        // Create a queue based on current context (playlist or all songs)
+        // Create a queue based on current context (playlist or category)
         const availableSongs = [];
-        const songsToShuffle = this.filteredSongs || this.songs;
+        const contextSongs = this.getContextSongs();
         
-        for (let i = 0; i < songsToShuffle.length; i++) {
-            const songIndex = this.songs.indexOf(songsToShuffle[i]);
-            if (songIndex !== this.currentSongIndex) {
+        for (let i = 0; i < contextSongs.length; i++) {
+            const songIndex = this.songs.indexOf(contextSongs[i]);
+            if (songIndex !== this.currentSongIndex && songIndex >= 0) {
                 availableSongs.push(songIndex);
             }
         }
@@ -3476,7 +3593,7 @@ class MusicPlayer {
     
     getPreviousShuffleSong() {
         if (this.shuffleHistory.length === 0) {
-            return this.currentSongIndex > 0 ? this.currentSongIndex - 1 : this.songs.length - 1;
+            return this.getPreviousSongInContext();
         }
         
         // Get last song from history
@@ -3488,6 +3605,59 @@ class MusicPlayer {
         }
         
         return prevIndex;
+    }
+    
+    getContextSongs() {
+        // Return songs based on current context (playlist or category)
+        if (this.currentPlaylist) {
+            return this.getPlaylistSongs(this.currentPlaylist);
+        } else if (this.filteredSongs) {
+            return this.filteredSongs;
+        } else {
+            return this.songs;
+        }
+    }
+    
+    getNextSongInContext() {
+        const contextSongs = this.getContextSongs();
+        const currentSong = this.songs[this.currentSongIndex];
+        const currentContextIndex = contextSongs.indexOf(currentSong);
+        
+        if (currentContextIndex === -1) {
+            // Current song not in context, return first song of context
+            return contextSongs.length > 0 ? this.songs.indexOf(contextSongs[0]) : null;
+        }
+        
+        if (currentContextIndex < contextSongs.length - 1) {
+            // Next song in context
+            return this.songs.indexOf(contextSongs[currentContextIndex + 1]);
+        } else {
+            // At end of context
+            if (this.repeatMode === 'all') {
+                return contextSongs.length > 0 ? this.songs.indexOf(contextSongs[0]) : null;
+            } else {
+                return null; // Stop at end if no repeat
+            }
+        }
+    }
+    
+    getPreviousSongInContext() {
+        const contextSongs = this.getContextSongs();
+        const currentSong = this.songs[this.currentSongIndex];
+        const currentContextIndex = contextSongs.indexOf(currentSong);
+        
+        if (currentContextIndex === -1) {
+            // Current song not in context, return last song of context
+            return contextSongs.length > 0 ? this.songs.indexOf(contextSongs[contextSongs.length - 1]) : null;
+        }
+        
+        if (currentContextIndex > 0) {
+            // Previous song in context
+            return this.songs.indexOf(contextSongs[currentContextIndex - 1]);
+        } else {
+            // At beginning of context, go to end
+            return contextSongs.length > 0 ? this.songs.indexOf(contextSongs[contextSongs.length - 1]) : null;
+        }
     }
     
     toggleRepeat() {
@@ -3533,8 +3703,8 @@ class MusicPlayer {
     
     setupKeyboardShortcuts() {
         document.addEventListener('keydown', (e) => {
-            // Prevent shortcuts when typing in input fields
-            if (e.target.tagName === 'INPUT') return;
+            // Prevent shortcuts when typing in input fields or when download panel is active
+            if (e.target.tagName === 'INPUT' || this.currentView === 'download') return;
             
             // Block all Ctrl+zoom combinations
             if (e.ctrlKey && (e.code === 'Equal' || e.code === 'Minus' || e.code === 'Digit0' || 
@@ -3677,6 +3847,22 @@ class MusicPlayer {
     }
     
 
+    searchMusicOnline() {
+        if (this.currentSongIndex < 0) {
+            this.showNotification('No song selected', 'error');
+            return;
+        }
+        
+        const song = this.songs[this.currentSongIndex];
+        const cleanArtist = song.artist.replace(/ - Topic$/, '');
+        const searchQuery = `${song.title} ${cleanArtist}`;
+        const encodedQuery = encodeURIComponent(searchQuery);
+        const url = `https://lrclib.net/search/${encodedQuery}`;
+        
+        // Open in external browser
+        require('electron').shell.openExternal(url);
+    }
+    
     showNotification(message, type = 'info') {
         // Remove existing notification to prevent stacking
         const existing = document.querySelector('.notification');
@@ -3987,17 +4173,13 @@ class MusicPlayer {
         const isSettingsVisible = this.settingsPanel.style.display === 'block';
         
         if (isSettingsVisible) {
-            // Hide settings, show music library
-            this.settingsPanel.style.display = 'none';
-            this.musicContainer.style.display = 'flex';
+            this.showMusicView();
             this.settingsBtn.classList.remove('active');
         } else {
-            // Hide playlist details when opening settings
-            this.hidePlaylistDetails();
-            // Show settings, hide music library
+            this.hideAllPanels();
             this.settingsPanel.style.display = 'block';
-            this.musicContainer.style.display = 'none';
             this.settingsBtn.classList.add('active');
+            this.currentView = 'settings';
         }
     }
     
@@ -4387,3 +4569,4 @@ window.closeApp = () => ipcRenderer.send('window-close');
 
 // Start app
 const musicPlayer = new MusicPlayer();
+window.player = musicPlayer; // Make globally accessible

@@ -19,7 +19,17 @@
       "output": "dist"
     },
     "files": [
-      "**/*"
+      "**/*",
+      "!node_modules",
+      "download/**/*",
+      "setup-spotdl.js"
+    ],
+    "extraResources": [
+      {
+        "from": "ffmpeg/",
+        "to": "ffmpeg/",
+        "filter": ["**/*"]
+      }
     ],
     "asar": false,
     "win": {
@@ -35,6 +45,7 @@
   },
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --win"
+    "build": "electron-builder --win",
+    "prebuild": "node prebuild.js"
   }
 }

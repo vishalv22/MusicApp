@@ -170,6 +170,17 @@ ipcMain.handle('get-music-files', async () => {
     const files = fs.readdirSync(musicDir)
         .filter(file => /\.(mp3|wav|ogg|m4a|flac)$/i.test(file));
     
+    // Load existing file timestamps
+    const timestampsPath = path.join(getUserDataPath(), 'file-timestamps.json');
+    let fileTimestamps = {};
+    if (fs.existsSync(timestampsPath)) {
+        try {
+            fileTimestamps = JSON.parse(fs.readFileSync(timestampsPath, 'utf8'));
+        } catch (error) {
+            fileTimestamps = {};
+        }
+    }
+    
     const musicFiles = [];
     
     for (const file of files) {
@@ -180,6 +191,10 @@ ipcMain.handle('get-music-files', async () => {
             
             const musicTitle = common.title || file.replace(/\.[^/.]+$/, '');
             
+            // Get file stats for dateAdded
+            const stats = fs.statSync(filePath);
+            const dateAdded = fileTimestamps[file] || stats.birthtime || stats.mtime;
+            
             musicFiles.push({
                 name: file,
                 baseName: file.replace(/\.[^/.]+$/, ''),
@@ -188,11 +203,16 @@ ipcMain.handle('get-music-files', async () => {
                 artist: common.artist || 'Unknown Artist',
                 album: common.album || 'Unknown Album',
                 duration: metadata.format.duration || 0,
-                picture: common.picture && common.picture[0] ? common.picture[0].data : null
+                picture: common.picture && common.picture[0] ? common.picture[0].data : null,
+                dateAdded: dateAdded
             });
         } catch (error) {
             // Fallback for files without metadata
             const musicTitle = file.replace(/\.[^/.]+$/, '');
+            
+            // Get file stats for dateAdded
+            const stats = fs.statSync(filePath);
+            const dateAdded = fileTimestamps[file] || stats.birthtime || stats.mtime;
             
             musicFiles.push({
                 name: file,
@@ -202,7 +222,8 @@ ipcMain.handle('get-music-files', async () => {
                 artist: 'Unknown Artist',
                 album: 'Unknown Album',
                 duration: 0,
-                picture: null
+                picture: null,
+                dateAdded: dateAdded
             });
         }
     }
@@ -315,11 +336,26 @@ ipcMain.handle('get-video-files', async () => {
     const files = fs.readdirSync(videoDir)
         .filter(file => /\.(mp4|avi|mkv|mov|wmv|flv|webm|m4v)$/i.test(file));
     
+    // Load existing file timestamps
+    const timestampsPath = path.join(getUserDataPath(), 'file-timestamps.json');
+    let fileTimestamps = {};
+    if (fs.existsSync(timestampsPath)) {
+        try {
+            fileTimestamps = JSON.parse(fs.readFileSync(timestampsPath, 'utf8'));
+        } catch (error) {
+            fileTimestamps = {};
+        }
+    }
+    
     const videoFiles = [];
     
     for (const file of files) {
         const filePath = path.join(videoDir, file);
         const videoTitle = file.replace(/\.[^/.]+$/, '');
+        
+        // Get file stats for dateAdded
+        const stats = fs.statSync(filePath);
+        const dateAdded = fileTimestamps[file] || stats.birthtime || stats.mtime;
         
         videoFiles.push({
             name: file,
@@ -330,7 +366,8 @@ ipcMain.handle('get-video-files', async () => {
             album: 'Videos',
             duration: 0,
             picture: null,
-            isVideo: true
+            isVideo: true,
+            dateAdded: dateAdded
         });
     }
     
@@ -371,6 +408,20 @@ ipcMain.handle('add-files', async (event, filePaths, type) => {
         fs.mkdirSync(targetDir, { recursive: true });
     }
     
+    // Load existing timestamps
+    const timestampsPath = path.join(getUserDataPath(), 'file-timestamps.json');
+    let fileTimestamps = {};
+    if (fs.existsSync(timestampsPath)) {
+        try {
+            fileTimestamps = JSON.parse(fs.readFileSync(timestampsPath, 'utf8'));
+        } catch (error) {
+            fileTimestamps = {};
+        }
+    }
+    
+    const currentTime = new Date().toISOString();
+    let newFilesAdded = false;
+    
     for (const filePath of filePaths) {
         const fileName = path.basename(filePath);
         const targetPath = path.join(targetDir, fileName);
@@ -378,8 +429,23 @@ ipcMain.handle('add-files', async (event, filePaths, type) => {
         try {
             if (fs.existsSync(targetPath)) continue;
             fs.copyFileSync(filePath, targetPath);
+            
+            // Track when this file was added (for music and video files)
+            if (type === 'music' || type === 'video') {
+                fileTimestamps[fileName] = currentTime;
+                newFilesAdded = true;
+            }
         } catch (error) {
             console.error(`Error copying ${fileName}:`, error);
+        }
+    }
+    
+    // Save updated timestamps if new music files were added
+    if (newFilesAdded) {
+        try {
+            fs.writeFileSync(timestampsPath, JSON.stringify(fileTimestamps, null, 2));
+        } catch (error) {
+            console.error('Error saving file timestamps:', error);
         }
     }
 });
@@ -727,6 +793,56 @@ ipcMain.handle('remove-attached-video', async (event, songBaseName) => {
         return true;
     } catch (error) {
         console.error('Error removing attached video:', error);
+        return false;
+    }
+});
+
+// SpotDL web server handler
+const SpotDLSetup = require('./setup-spotdl');
+let spotdlProcess = null;
+let spotdlSetup = null;
+
+ipcMain.handle('stop-spotdl-server', async () => {
+    if (spotdlProcess) {
+        spotdlProcess.kill();
+        spotdlProcess = null;
+        return true;
+    }
+    return false;
+});
+
+ipcMain.handle('start-spotdl-server', async () => {
+    if (spotdlProcess) {
+        return true;
+    }
+    
+    try {
+        if (!spotdlSetup) {
+            spotdlSetup = new SpotDLSetup(__dirname);
+        }
+        
+        // Ensure FFmpeg is available
+        const ffmpegPath = await spotdlSetup.ensureFFmpeg();
+        console.log('FFmpeg available at:', ffmpegPath);
+        
+        const musicDir = path.join(getUserDataPath(), 'music');
+        
+        // Start SpotDL server with FFmpeg path
+        spotdlProcess = await spotdlSetup.startServer(musicDir, ffmpegPath);
+        
+        spotdlProcess.on('error', (error) => {
+            console.error('SpotDL server error:', error);
+            spotdlProcess = null;
+        });
+        
+        spotdlProcess.on('exit', (code) => {
+            console.log('SpotDL server exited with code:', code);
+            spotdlProcess = null;
+        });
+        
+        return true;
+    } catch (error) {
+        console.error('Failed to start SpotDL server:', error);
         return false;
     }
 });
