@@ -84,3 +84,24 @@ temp/
 
 # Yarn Integrity file
 .yarn-integrity
+
+# Electron specific runtime
+electron-builder-cache/
+*.blockmap
+
+# User data and settings
+storage/
+user-data/
+music-cache/
+lyrics-cache/
+
+# FFmpeg binaries (if not needed in repo)
+ffmpeg/
+python-portable/
+
+# Music app specific
+watched-folders.json
+file-timestamps.json
+manual-lyrics.json
+video-attachments.json
+settings.json
