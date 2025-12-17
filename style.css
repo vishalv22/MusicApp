@@ -39,6 +39,16 @@ body {
     user-select: none;
 }
 
+/* Disable dragging for all images */
+img {
+    -webkit-user-drag: none;
+    -khtml-user-drag: none;
+    -moz-user-drag: none;
+    -o-user-drag: none;
+    user-drag: none;
+    pointer-events: auto;
+}
+
 /* Global scrollbar styles */
 ::-webkit-scrollbar {
     width: 6px;
@@ -3237,4 +3247,26 @@ body.light-theme .download-loading {
 body.light-theme #spotdlFrame {
     background: #fff;
     box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+/* Main Panel Video Styles */
+.main-panel-video {
+    width: 100%;
+    height: 100%;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+}
+
+.main-panel-video video {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+}
+
+body.light-theme .main-panel-video {
+    background: #000;
 }

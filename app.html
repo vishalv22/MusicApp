@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Music Player</title>
+    <title>ViMusic Beta</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -55,7 +55,7 @@
                         </div>
                     </div>
                     <button class="panel-action-btn" id="viewStorageFolderBtn"><img src="icons/folder.png"> View in Folder</button>
-                    <button class="panel-action-btn" id="addMusicFilesBtn"><img src="icons/add.png"> Add Music Files</button>
+                    <button class="panel-action-btn" id="addMusicFilesBtn"><img src="icons/add.png"> Add Music Folder</button>
                     <button class="panel-action-btn" id="downloadMusicBtn"><img src="icons/download.png"> Download Music</button>
                     <div class="panel-divider"></div>
                     <h3 class="panel-heading">Playlists</h3>
@@ -305,16 +305,11 @@
                     </div>
                 </div>
                 
-                <div class="download-panel" id="downloadPanel" style="display: none;">
-                    <iframe id="spotdlFrame" src="" style="width: 100%; height: 100%; border: none; display: none;"></iframe>
-                    <div class="download-loading" id="downloadLoading" style="display: flex; align-items: center; justify-content: center; height: 100%; flex-direction: column;">
-                        <p>Starting SpotDL server...</p>
-                        <div style="margin-top: 10px; font-size: 12px; color: #666;">This may take a few moments</div>
-                    </div>
-                </div>
+
                 
+
                 <div class="context-menu" id="contextMenu">
-                    <div class="menu-item" id="addMusic">Add Music</div>
+                    <div class="menu-item" id="addMusic">Add Music Folder</div>
                     <div class="menu-item" id="addVideo">Add Video</div>
                     <div class="menu-item" id="addLyrics">Add Lyrics</div>
                     <div class="menu-item" id="viewFolder">View Folder</div>
@@ -348,6 +343,16 @@
                     </div>
                     <div class="menu-item" id="pinPlaylist">Pin Playlist</div>
                     <div class="menu-item" id="deletePlaylist">Delete Playlist</div>
+                </div>
+                
+                <div class="context-menu" id="videoContextMenu">
+                    <div class="menu-item" id="playInMainPanel">Play in Main Panel</div>
+                    <div class="menu-item" id="playFullScreen">Full Screen</div>
+                </div>
+                
+                <div class="context-menu" id="mainPanelVideoContextMenu">
+                    <div class="menu-item" id="switchBackToMiniPlayer">Switch back to Mini Player</div>
+                    <div class="menu-item" id="mainPanelFullScreen">Full Screen</div>
                 </div>
                 
                 <input type="file" id="musicFileInput" multiple accept="audio/*" style="display: none;">
@@ -424,7 +429,7 @@
                 
                 <div class="time-display">
                     <span id="time">00:00 / 00:00</span>
-                    <div class="signature">by Vishal</div>
+                    <div class="signature">by Vishal • <span style="color: #ff6b6b; font-weight: 500;">BETA</span></div>
                 </div>
                 
                 <div class="volume-container">

@@ -75,6 +75,11 @@ function createWindow() {
                 y: bounds.y
             };
             
+            // Ensure directory exists before writing
+            const settingsDir = path.dirname(settingsPath);
+            if (!fs.existsSync(settingsDir)) {
+                fs.mkdirSync(settingsDir, { recursive: true });
+            }
             fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
         }
     };
@@ -159,16 +164,66 @@ const saveManualAttachments = (attachments) => {
     }
 };
 
-// Get music files with metadata
+// Helper functions for watched folders
+const getWatchedFolders = () => {
+    const foldersPath = path.join(getUserDataPath(), 'watched-folders.json');
+    if (fs.existsSync(foldersPath)) {
+        try {
+            return JSON.parse(fs.readFileSync(foldersPath, 'utf8'));
+        } catch (error) {
+            console.error('Error loading watched folders:', error);
+            return [];
+        }
+    }
+    return [];
+};
+
+const saveWatchedFolders = (folders) => {
+    const foldersPath = path.join(getUserDataPath(), 'watched-folders.json');
+    try {
+        const storageDir = path.dirname(foldersPath);
+        if (!fs.existsSync(storageDir)) {
+            fs.mkdirSync(storageDir, { recursive: true });
+        }
+        fs.writeFileSync(foldersPath, JSON.stringify(folders, null, 2));
+    } catch (error) {
+        console.error('Error saving watched folders:', error);
+    }
+};
+
+const scanFolderRecursively = (folderPath) => {
+    const files = [];
+    try {
+        const items = fs.readdirSync(folderPath);
+        for (const item of items) {
+            const fullPath = path.join(folderPath, item);
+            const stat = fs.statSync(fullPath);
+            if (stat.isDirectory()) {
+                files.push(...scanFolderRecursively(fullPath));
+            } else if (/\.(mp3|wav|ogg|m4a|flac)$/i.test(item)) {
+                files.push(fullPath);
+            }
+        }
+    } catch (error) {
+        console.error(`Error scanning folder ${folderPath}:`, error);
+    }
+    return files;
+};
+
+// Get music files from watched folders
 ipcMain.handle('get-music-files', async () => {
-    const musicDir = path.join(getUserDataPath(), 'music');
-    if (!fs.existsSync(musicDir)) {
-        fs.mkdirSync(musicDir, { recursive: true });
+    const watchedFolders = getWatchedFolders();
+    if (watchedFolders.length === 0) {
         return [];
     }
     
-    const files = fs.readdirSync(musicDir)
-        .filter(file => /\.(mp3|wav|ogg|m4a|flac)$/i.test(file));
+    const allFiles = [];
+    for (const folderPath of watchedFolders) {
+        if (fs.existsSync(folderPath)) {
+            const files = scanFolderRecursively(folderPath);
+            allFiles.push(...files);
+        }
+    }
     
     // Load existing file timestamps
     const timestampsPath = path.join(getUserDataPath(), 'file-timestamps.json');
@@ -183,8 +238,8 @@ ipcMain.handle('get-music-files', async () => {
     
     const musicFiles = [];
     
-    for (const file of files) {
-        const filePath = path.join(musicDir, file);
+    for (const filePath of allFiles) {
+        const file = path.basename(filePath);
         try {
             const metadata = await mm.parseFile(filePath);
             const common = metadata.common;
@@ -393,61 +448,34 @@ ipcMain.handle('read-lyrics', (event, baseName) => {
     return fs.existsSync(lyricsPath) ? fs.readFileSync(lyricsPath, 'utf8') : null;
 });
 
-// Add files
-ipcMain.handle('add-files', async (event, filePaths, type) => {
-    // Validate type parameter to prevent path traversal
-    const allowedTypes = ['music', 'video', 'lyrics'];
-    if (!allowedTypes.includes(type)) {
-        console.error('Invalid directory type:', type);
-        return;
+// Add watched folders
+ipcMain.handle('add-music-folders', async (event, folderPaths) => {
+    const watchedFolders = getWatchedFolders();
+    const newFolders = folderPaths.filter(folder => !watchedFolders.includes(folder));
+    
+    if (newFolders.length > 0) {
+        watchedFolders.push(...newFolders);
+        saveWatchedFolders(watchedFolders);
     }
     
-    const targetDir = path.join(getUserDataPath(), type);
-    
-    if (!fs.existsSync(targetDir)) {
-        fs.mkdirSync(targetDir, { recursive: true });
+    return newFolders.length;
+});
+
+// Remove watched folder
+ipcMain.handle('remove-music-folder', async (event, folderPath) => {
+    const watchedFolders = getWatchedFolders();
+    const index = watchedFolders.indexOf(folderPath);
+    if (index > -1) {
+        watchedFolders.splice(index, 1);
+        saveWatchedFolders(watchedFolders);
+        return true;
     }
-    
-    // Load existing timestamps
-    const timestampsPath = path.join(getUserDataPath(), 'file-timestamps.json');
-    let fileTimestamps = {};
-    if (fs.existsSync(timestampsPath)) {
-        try {
-            fileTimestamps = JSON.parse(fs.readFileSync(timestampsPath, 'utf8'));
-        } catch (error) {
-            fileTimestamps = {};
-        }
-    }
-    
-    const currentTime = new Date().toISOString();
-    let newFilesAdded = false;
-    
-    for (const filePath of filePaths) {
-        const fileName = path.basename(filePath);
-        const targetPath = path.join(targetDir, fileName);
-        
-        try {
-            if (fs.existsSync(targetPath)) continue;
-            fs.copyFileSync(filePath, targetPath);
-            
-            // Track when this file was added (for music and video files)
-            if (type === 'music' || type === 'video') {
-                fileTimestamps[fileName] = currentTime;
-                newFilesAdded = true;
-            }
-        } catch (error) {
-            console.error(`Error copying ${fileName}:`, error);
-        }
-    }
-    
-    // Save updated timestamps if new music files were added
-    if (newFilesAdded) {
-        try {
-            fs.writeFileSync(timestampsPath, JSON.stringify(fileTimestamps, null, 2));
-        } catch (error) {
-            console.error('Error saving file timestamps:', error);
-        }
-    }
+    return false;
+});
+
+// Get watched folders
+ipcMain.handle('get-watched-folders', async () => {
+    return getWatchedFolders();
 });
 
 // Open folder
@@ -713,14 +741,11 @@ ipcMain.handle('browse-lyrics-file', async () => {
     return result;
 });
 
-// Browse for music files
-ipcMain.handle('browse-music-files', async () => {
+// Browse for music folders
+ipcMain.handle('browse-music-folders', async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
-        title: 'Select Music Files',
-        filters: [
-            { name: 'Audio Files', extensions: ['mp3', 'wav', 'ogg', 'm4a', 'flac'] }
-        ],
-        properties: ['openFile', 'multiSelections']
+        title: 'Select Music Folders',
+        properties: ['openDirectory', 'multiSelections']
     });
     return result;
 });
@@ -797,52 +822,5 @@ ipcMain.handle('remove-attached-video', async (event, songBaseName) => {
     }
 });
 
-// SpotDL web server handler
-const SpotDLSetup = require('./setup-spotdl');
-let spotdlProcess = null;
-let spotdlSetup = null;
 
-ipcMain.handle('stop-spotdl-server', async () => {
-    if (spotdlProcess) {
-        spotdlProcess.kill();
-        spotdlProcess = null;
-        return true;
-    }
-    return false;
-});
 
-ipcMain.handle('start-spotdl-server', async () => {
-    if (spotdlProcess) {
-        return true;
-    }
-    
-    try {
-        if (!spotdlSetup) {
-            spotdlSetup = new SpotDLSetup(__dirname);
-        }
-        
-        // Ensure FFmpeg is available
-        const ffmpegPath = await spotdlSetup.ensureFFmpeg();
-        console.log('FFmpeg available at:', ffmpegPath);
-        
-        const musicDir = path.join(getUserDataPath(), 'music');
-        
-        // Start SpotDL server with FFmpeg path
-        spotdlProcess = await spotdlSetup.startServer(musicDir, ffmpegPath);
-        
-        spotdlProcess.on('error', (error) => {
-            console.error('SpotDL server error:', error);
-            spotdlProcess = null;
-        });
-        
-        spotdlProcess.on('exit', (code) => {
-            console.log('SpotDL server exited with code:', code);
-            spotdlProcess = null;
-        });
-        
-        return true;
-    } catch (error) {
-        console.error('Failed to start SpotDL server:', error);
-        return false;
-    }
-});

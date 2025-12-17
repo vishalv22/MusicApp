@@ -1,10 +1,11 @@
 {
   "name": "vimusic",
-  "version": "1.0.0",
+  "version": "0.9.0-beta",
   "description": "ViMusic - A music player with synchronized lyrics",
   "main": "main.js",
   "author": "Vishal",
   "dependencies": {
+    "adm-zip": "^0.5.10",
     "dompurify": "^3.2.6",
     "music-metadata": "^10.5.0"
   },
@@ -20,7 +21,7 @@
     },
     "files": [
       "**/*",
-      "!node_modules",
+      "node_modules/**/*",
       "download/**/*",
       "setup-spotdl.js"
     ],
@@ -28,6 +29,11 @@
       {
         "from": "ffmpeg/",
         "to": "ffmpeg/",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "python-portable/",
+        "to": "python/",
         "filter": ["**/*"]
       }
     ],
@@ -46,6 +52,7 @@
   "scripts": {
     "start": "electron .",
     "build": "electron-builder --win",
-    "prebuild": "node prebuild.js"
+    "prebuild": "node prebuild.js",
+    "prepare-portable": "node prepare-portable.js"
   }
 }

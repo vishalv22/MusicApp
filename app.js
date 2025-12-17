@@ -31,6 +31,8 @@ class MusicPlayer {
         this.originalVolume = 1;
         this.nextAudio = null;
         this.spotdlServerRunning = false;
+        this.videoInMainPanel = false;
+        this.mainPanelVideo = null;
         
         // Audio context for equalizer
         this.audioContext = null;
@@ -202,6 +204,12 @@ class MusicPlayer {
         this.videoElement.oncanplay = () => this.handleVideoReady();
         this.videoElement.onerror = () => this.handleVideoError();
         this.videoElement.onpause = () => this.handleVideoPause();
+        this.videoElement.oncontextmenu = (e) => {
+            if (this.isVideoMode) {
+                e.preventDefault();
+                this.showVideoContextMenu(e.clientX, e.clientY);
+            }
+        };
         
         this.setupProgressBar();
         this.setupVolumeControl();
@@ -362,14 +370,14 @@ class MusicPlayer {
     displayEmptyState() {
         this.songsDiv.innerHTML = `
             <div class="empty-library">
-                <div class="empty-icon">🎵</div>
-                <h3>No music files found</h3>
-                <p>Right-click to add music files</p>
-                <p class="sub-text">Drag & drop music files or right-click to add</p>
+                <div class="empty-icon">📁</div>
+                <h3>No music folders added</h3>
+                <p>Add your music folders to get started</p>
+                <p class="sub-text">Right-click → "Add Music Folder" or use side panel button</p>
                 <p class="sub-text">Supported: MP3, WAV, OGG, M4A, FLAC</p>
-                <p class="sub-text">Video: MP4, AVI, MKV, MOV, WMV, WEBM</p>
-                <p class="sub-text">Add .lrc files for synchronized lyrics</p>
-                <p class="sub-text tip">💡 Tip: Keep similar names for music and lyrics files for better auto-matching</p>
+                <p class="sub-text">App will scan all subfolders automatically</p>
+                <p class="sub-text">Add .lrc files in same folders for synchronized lyrics</p>
+                <p class="sub-text tip">💡 Tip: Your music files stay in their original locations</p>
             </div>
         `;
     }
@@ -416,22 +424,27 @@ class MusicPlayer {
             this.videoElement.src = '';
         }
         
-        // Check if we should start with video mode (if video button is active and video is available)
-        const shouldStartWithVideo = this.videoBtn.classList.contains('active') && (song.isVideo || song.attachedVideo || song.youtubeVideo);
+        // Check if video button is active (video mode preference)
+        const videoModePreferred = this.videoBtn.classList.contains('active');
+        const hasVideo = song.isVideo || song.attachedVideo || song.youtubeVideo;
         
-        if (shouldStartWithVideo) {
-            // Setup video content first
+        if (videoModePreferred && hasVideo) {
+            // Video mode with video available
             if (song.youtubeVideo) {
                 this.videoPlayer.innerHTML = `<iframe src="${song.youtubeVideo.url}" width="100%" height="100%" frameborder="0" allowfullscreen></iframe>`;
             }
             this.showVideoPlayer();
             this.isVideoMode = true;
-            // Load song-specific offset for video mode
             this.lyricsOffset = this.songOffsets[song.baseName] || 0;
-        } else {
+        } else if (videoModePreferred && !hasVideo) {
+            // Video mode preferred but no video - fall back to audio but keep video button active
             this.hideVideoPlayer();
             this.isVideoMode = false;
-            // Reset offset for music mode
+            this.lyricsOffset = 0;
+        } else {
+            // Normal audio mode
+            this.hideVideoPlayer();
+            this.isVideoMode = false;
             this.lyricsOffset = 0;
         }
         
@@ -444,8 +457,8 @@ class MusicPlayer {
             this.currentImageUrl = null;
         }
         
-        // Show album cover only if not in video mode
-        if (!this.isVideoMode) {
+        // Show album cover if not in video mode OR if video is in main panel
+        if (!this.isVideoMode || this.videoInMainPanel) {
             if (song.picture) {
                 const blob = new Blob([song.picture]);
                 this.currentImageUrl = URL.createObjectURL(blob);
@@ -462,6 +475,11 @@ class MusicPlayer {
                 this.albumCover.style.display = 'flex';
                 this.albumCover.style.alignItems = 'center';
                 this.albumCover.style.justifyContent = 'center';
+            }
+            
+            // Hide video player when showing album cover
+            if (this.videoInMainPanel) {
+                this.videoPlayer.style.display = 'none';
             }
         }
         
@@ -497,7 +515,7 @@ class MusicPlayer {
                     <p class="no-lyrics">No lyrics available</p>
                     <div class="lyrics-instructions">
                         <ul class="instruction-list">
-                            <li>Drop .lrc file here</li>
+                            <li>Add .lrc file to music folder</li>
                             <li>Right-click and paste synced lyrics</li>
                             <li><a href="#" onclick="player.searchMusicOnline()" style="color: #4a9eff; text-decoration: none;">Search for Lyrics Online</a></li>
                         </ul>
@@ -528,6 +546,20 @@ class MusicPlayer {
         if (this.isVideoMode) {
             if (!song.youtubeVideo) {
                 this.videoElement.currentTime = 0;
+                
+                // Update main panel video if it's active
+                if (this.videoInMainPanel && this.updateMainPanelVideo) {
+                    const videoSrc = song.isVideo ? 
+                        `file:///${song.path.replace(/\\/g, '/')}` : 
+                        (song.attachedVideo ? `file:///${song.attachedVideo.path.replace(/\\/g, '/')}` : '');
+                    
+                    if (videoSrc) {
+                        this.updateMainPanelVideo(videoSrc);
+                    } else {
+                        this.showNoVideoMessage();
+                    }
+                }
+                
                 if (autoPlay) {
                     this.playVideo();
                 }
@@ -594,6 +626,10 @@ class MusicPlayer {
     }
     
     play() {
+        // Ensure video is completely stopped
+        this.videoElement.pause();
+        this.videoElement.src = '';
+        
         this.initializeAudioContext();
         
         const crossfadeDuration = this.settings.crossfadeDuration || 0;
@@ -626,6 +662,10 @@ class MusicPlayer {
     }
     
     playVideo() {
+        // Ensure audio is completely stopped
+        this.audio.pause();
+        this.audio.src = '';
+        
         if (this.videoElement.readyState >= 2) {
             this.videoElement.play().catch(error => {
                 console.error('Video playback failed:', error);
@@ -1018,6 +1058,8 @@ class MusicPlayer {
                 this.hideSongContextMenu();
                 this.hideLyricsContextMenu();
                 this.hidePlaylistContextMenu();
+                this.hideVideoContextMenu();
+                this.hideMainPanelVideoContextMenu();
             }
         });
         
@@ -1038,9 +1080,15 @@ class MusicPlayer {
         };
         
         document.getElementById('addMusic').onclick = async () => {
-            const result = await ipcRenderer.invoke('browse-music-files');
+            const result = await ipcRenderer.invoke('browse-music-folders');
             if (result && !result.canceled && result.filePaths.length > 0) {
-                await this.handleFileAdd(result.filePaths.map(path => ({path})), 'music');
+                const count = await ipcRenderer.invoke('add-music-folders', result.filePaths);
+                if (count > 0) {
+                    this.showNotification(`Added ${count} music folder(s)`, 'success');
+                    await this.loadMusic();
+                } else {
+                    this.showNotification('Folders already added', 'info');
+                }
             }
             this.hideContextMenu();
         };
@@ -1092,6 +1140,14 @@ class MusicPlayer {
         document.getElementById('mergePlaylist').onclick = () => this.mergePlaylist();
         document.getElementById('pinPlaylist').onclick = () => this.pinPlaylist();
         document.getElementById('deletePlaylist').onclick = () => this.deletePlaylistFromMenu();
+        
+        // Video context menu handlers
+        document.getElementById('playInMainPanel').onclick = () => this.playVideoInMainPanel();
+        document.getElementById('playFullScreen').onclick = () => this.playVideoFullScreen();
+        
+        // Main panel video context menu handlers
+        document.getElementById('switchBackToMiniPlayer').onclick = () => this.switchBackToMiniPlayer();
+        document.getElementById('mainPanelFullScreen').onclick = () => this.playVideoFullScreen();
     }
     
     setupDragDrop() {
@@ -1485,80 +1541,10 @@ class MusicPlayer {
         this.hideSongContextMenu();
     }
     
-    async handleFileAdd(files, type) {
-        const fileArray = Array.from(files);
-        this.showNotification(`Adding ${fileArray.length} ${type} files...`, 'info');
-        try {
-            await ipcRenderer.invoke('add-files', fileArray.map(f => f.path), type);
-            
-            this.showNotification(`Added ${fileArray.length} ${type} files successfully`, 'success');
-            
-            // Switch to All Songs and refresh quickly for music files
-            if (type === 'music' || type === 'video') {
-                this.currentPlaylist = null;
-                this.hidePlaylistDetails();
-                this.searchInput.value = '';
-                await this.loadMusic();
-                this.selectCategory('all', 'All Songs');
-            } else {
-                await this.loadMusic();
-            }
-        } catch (error) {
-            this.showNotification(`Failed to add ${type} files`, 'error');
-        }
-    }
+
     
     async handleFileDrop(files) {
-        const musicFiles = [];
-        const videoFiles = [];
-        const lyricsFiles = [];
-        
-        Array.from(files).forEach(file => {
-            const filePath = file.path || file.webkitRelativePath || file.name;
-            if (/\.(mp3|wav|ogg|m4a|flac)$/i.test(file.name)) {
-                musicFiles.push(filePath);
-            } else if (/\.(mp4|avi|mkv|mov|wmv|flv|webm|m4v)$/i.test(file.name)) {
-                videoFiles.push(filePath);
-            } else if (file.name.endsWith('.lrc')) {
-                lyricsFiles.push(filePath);
-            }
-        });
-        
-        const totalFiles = musicFiles.length + videoFiles.length + lyricsFiles.length;
-        if (totalFiles === 0) {
-            this.showNotification('No supported files found', 'error');
-            return;
-        }
-        
-        this.showNotification(`Adding ${totalFiles} files...`, 'info');
-        
-        try {
-            // Run file operations in parallel for better performance
-            const promises = [];
-            if (musicFiles.length > 0) {
-                promises.push(ipcRenderer.invoke('add-files', musicFiles, 'music'));
-            }
-            if (videoFiles.length > 0) {
-                promises.push(ipcRenderer.invoke('add-files', videoFiles, 'video'));
-            }
-            if (lyricsFiles.length > 0) {
-                promises.push(ipcRenderer.invoke('add-files', lyricsFiles, 'lyrics'));
-            }
-            
-            if (promises.length > 0) {
-                await Promise.all(promises);
-                this.showNotification(`Successfully added ${totalFiles} files`, 'success');
-                
-                // Switch to All Songs and refresh quickly
-                this.currentPlaylist = null;
-                this.hidePlaylistDetails();
-                this.searchInput.value = '';
-                await this.loadMusic();
-                this.selectCategory('all', 'All Songs');
-            }
-        } catch (error) {
-            this.showNotification('Failed to add some files', 'error');
-        }
+        this.showNotification('Drag & drop not supported. Use "Add Music Folder" instead.', 'info');
     }
     
     setupSearch() {
@@ -1566,9 +1552,27 @@ class MusicPlayer {
             if (this.searchTimeout) {
                 clearTimeout(this.searchTimeout);
             }
+            
+            const query = e.target.value.trim();
+            
+            // Immediate search for short queries or clearing
+            if (query.length <= 2) {
+                this.filterSongs(query);
+                return;
+            }
+            
+            // Debounced search for longer queries
             this.searchTimeout = setTimeout(() => {
-                this.filterSongs(e.target.value);
-            }, 150);
+                this.filterSongs(query);
+            }, 100);
+        };
+        
+        // Clear search on Escape key
+        this.searchInput.onkeydown = (e) => {
+            if (e.key === 'Escape') {
+                this.searchInput.value = '';
+                this.filterSongs('');
+            }
         };
     }
     
@@ -1825,6 +1829,11 @@ class MusicPlayer {
         const wasPlaying = this.isPlaying;
         const currentTime = this.videoElement.currentTime;
         
+        // Move video back to default if in main panel
+        if (this.videoInMainPanel) {
+            this.moveVideoBackToDefault();
+        }
+        
         // Stop video completely and clear source
         this.videoElement.pause();
         this.videoElement.src = '';
@@ -1832,7 +1841,8 @@ class MusicPlayer {
         this.isPlaying = false;
         this.playPauseImg.src = 'icons/play.png';
         
-        // Setup music
+        // Setup music - restore audio source first
+        this.audio.src = `file:///${currentSong.path.replace(/\\/g, '/')}`;
         this.audio.currentTime = currentTime;
         this.hideVideoPlayer();
         this.isVideoMode = false;
@@ -1924,8 +1934,10 @@ class MusicPlayer {
         });
         
         document.getElementById('viewStorageFolderBtn').onclick = () => this.viewStorageFolder();
-        document.getElementById('addMusicFilesBtn').onclick = () => this.addMusicFiles();
-        document.getElementById('downloadMusicBtn').onclick = () => this.showDownloadInterface();
+        document.getElementById('addMusicFilesBtn').onclick = () => this.addMusicFolders();
+        document.getElementById('downloadMusicBtn').onclick = () => {
+            this.showNotification('Download feature removed', 'info');
+        };
         
         // Auto-hide dropdown on mouse leave
         const dropdownContainer = document.querySelector('.dropdown-container');
@@ -1955,41 +1967,64 @@ class MusicPlayer {
         const titleElement = document.getElementById('playlistTitle');
         const inputElement = document.getElementById('playlistTitleInput');
         
-        // Remove existing handlers
+        if (!editIcon || !titleElement || !inputElement) return;
+        
+        // Remove existing handlers to prevent duplicates
         editIcon.onclick = null;
         inputElement.onkeydown = null;
         inputElement.onblur = null;
         
-        editIcon.onclick = () => {
+        let isEditing = false;
+        
+        editIcon.onclick = (e) => {
+            e.stopPropagation();
+            if (isEditing) return;
+            
+            isEditing = true;
             titleElement.style.display = 'none';
             editIcon.style.display = 'none';
             inputElement.style.display = 'block';
             inputElement.value = playlistName;
-            inputElement.focus();
-            inputElement.select();
+            
+            // Use setTimeout to ensure proper focus
+            setTimeout(() => {
+                inputElement.focus();
+                inputElement.select();
+            }, 10);
         };
         
         const saveEdit = () => {
+            if (!isEditing) return;
+            
             const newName = inputElement.value.trim();
-            if (newName && newName !== playlistName) {
+            if (newName && newName !== playlistName && newName.length > 0) {
                 if (this.playlists[newName]) {
                     this.showNotification('Playlist name already exists', 'error');
+                    inputElement.focus();
+                    inputElement.select();
                     return;
                 }
                 this.renamePlaylist(playlistName, newName);
             }
+            
+            // Reset UI state
+            isEditing = false;
             titleElement.style.display = 'block';
             editIcon.style.display = 'block';
             inputElement.style.display = 'none';
         };
         
         const cancelEdit = () => {
+            if (!isEditing) return;
+            
+            isEditing = false;
             titleElement.style.display = 'block';
             editIcon.style.display = 'block';
             inputElement.style.display = 'none';
         };
         
         inputElement.onkeydown = (e) => {
+            e.stopPropagation();
             if (e.key === 'Enter') {
                 e.preventDefault();
                 saveEdit();
@@ -1999,7 +2034,10 @@ class MusicPlayer {
             }
         };
         
-        inputElement.onblur = saveEdit;
+        inputElement.onblur = () => {
+            // Small delay to prevent conflicts with other events
+            setTimeout(saveEdit, 100);
+        };
     }
     
     renamePlaylist(oldName, newName) {
@@ -2163,7 +2201,17 @@ class MusicPlayer {
         this.playlistOrder.push(name);
         this.savePlaylists();
         this.displayPlaylists();
-        this.showNotification(`Playlist "${name}" created`, 'success');
+        
+        // Auto-trigger rename for the newly created playlist
+        setTimeout(() => {
+            this.loadPlaylist(name);
+            setTimeout(() => {
+                const editIcon = document.getElementById('playlistEditIcon');
+                if (editIcon) {
+                    editIcon.click();
+                }
+            }, 100);
+        }, 50);
     }
     
     showPlaylistModal(editingName = null) {
@@ -2356,13 +2404,18 @@ class MusicPlayer {
         
         this.currentPlaylist = name;
         const playlistData = this.playlists[name];
-        const songs = Array.isArray(playlistData) ? playlistData : (playlistData?.songs || []);
+        const songNames = Array.isArray(playlistData) ? playlistData : (playlistData?.songs || []);
+        
+        // Get only the songs that are actually in this playlist
+        const playlistSongs = songNames.map(songName => {
+            return this.songs.find(song => song.name === songName);
+        }).filter(song => song !== undefined); // Remove any songs that no longer exist
         
         // Update UI immediately without loading states
-        this.showPlaylistDetails(name, songs.length);
+        this.showPlaylistDetails(name, playlistSongs.length);
         this.displayPlaylists();
         
-        if (songs.length === 0) {
+        if (playlistSongs.length === 0) {
             this.filteredSongs = [];
             this.songsDiv.innerHTML = `
                 <div class="empty-library">
@@ -2373,7 +2426,6 @@ class MusicPlayer {
                 </div>
             `;
         } else {
-            const playlistSongs = this.getPlaylistSongs(name);
             this.filteredSongs = playlistSongs;
             this.displayFilteredSongs();
         }
@@ -2570,85 +2622,40 @@ class MusicPlayer {
         this.showNotification('Opening storage folder', 'info');
     }
     
-    async addMusicFiles() {
+    async addMusicFolders() {
         try {
-            const result = await ipcRenderer.invoke('browse-music-files');
+            const result = await ipcRenderer.invoke('browse-music-folders');
             if (result && !result.canceled && result.filePaths.length > 0) {
-                this.showNotification(`Adding ${result.filePaths.length} files...`, 'info');
-                await ipcRenderer.invoke('add-files', result.filePaths, 'music');
+                this.showNotification(`Adding ${result.filePaths.length} folder(s)...`, 'info');
+                const count = await ipcRenderer.invoke('add-music-folders', result.filePaths);
                 await this.loadMusic();
-                this.showNotification(`Added ${result.filePaths.length} files successfully`, 'success');
+                this.showNotification(`Added ${count} new folder(s)`, 'success');
             }
         } catch (error) {
-            this.showNotification('Failed to add music files', 'error');
+            this.showNotification('Failed to add music folders', 'error');
         }
     }
     
-    async showDownloadInterface() {
-        this.hideAllPanels();
-        document.getElementById('downloadPanel').style.display = 'block';
-        this.leftPanel.classList.add('download-active');
-        this.currentView = 'download';
-        
-        const frame = document.getElementById('spotdlFrame');
-        const loading = document.getElementById('downloadLoading');
-        
-        if (!this.spotdlServerRunning) {
-            try {
-                loading.style.display = 'flex';
-                frame.style.display = 'none';
-                
-                const success = await ipcRenderer.invoke('start-spotdl-server');
-                
-                if (success) {
-                    setTimeout(() => {
-                        frame.src = 'http://127.0.0.1:8800';
-                        frame.style.display = 'block';
-                        loading.style.display = 'none';
-                        this.spotdlServerRunning = true;
-                        
-                        // Fix iframe input handling
-                        frame.onload = () => {
-                            try {
-                                frame.contentWindow.focus();
-                            } catch (e) {
-                                // Cross-origin, ignore
-                            }
-                        };
-                        
-                        // Ensure iframe can receive focus
-                        frame.onclick = () => {
-                            try {
-                                frame.contentWindow.focus();
-                            } catch (e) {
-                                // Cross-origin, ignore
-                            }
-                        };
-                    }, 3000);
-                } else {
-                    loading.innerHTML = '<p>Failed to start SpotDL server</p><p style="font-size: 12px; color: #666;">Make sure Python and SpotDL are installed</p>';
-                }
-            } catch (error) {
-                loading.innerHTML = '<p>Error starting SpotDL server</p>';
-            }
-        } else {
-            frame.style.display = 'block';
-            loading.style.display = 'none';
-        }
-    }
+
     
     hideAllPanels() {
         document.getElementById('musicContainer').style.display = 'none';
-        document.getElementById('downloadPanel').style.display = 'none';
         document.getElementById('settingsPanel').style.display = 'none';
         this.hidePlaylistDetails();
     }
+    
+
     
     showMusicView() {
         this.hideAllPanels();
         document.getElementById('musicContainer').style.display = 'flex';
         this.leftPanel.classList.remove('download-active');
         this.currentView = 'music';
+        
+        // Move video back to default position if it was in main panel
+        if (this.videoInMainPanel) {
+            this.moveVideoBackToDefault();
+        }
     }
     
     updateSelectionUI() {
@@ -3018,6 +3025,183 @@ class MusicPlayer {
         document.getElementById('playlistContextMenu').style.display = 'none';
     }
     
+    showVideoContextMenu(x, y) {
+        const videoContextMenu = document.getElementById('videoContextMenu');
+        videoContextMenu.style.display = 'block';
+        
+        const menuRect = videoContextMenu.getBoundingClientRect();
+        const adjustedX = Math.min(x, window.innerWidth - menuRect.width - 10);
+        const adjustedY = Math.min(y, window.innerHeight - menuRect.height - 10);
+        
+        videoContextMenu.style.left = `${adjustedX}px`;
+        videoContextMenu.style.top = `${adjustedY}px`;
+    }
+    
+    hideVideoContextMenu() {
+        document.getElementById('videoContextMenu').style.display = 'none';
+    }
+    
+    showMainPanelVideoContextMenu(x, y) {
+        const contextMenu = document.getElementById('mainPanelVideoContextMenu');
+        contextMenu.style.display = 'block';
+        
+        const menuRect = contextMenu.getBoundingClientRect();
+        const adjustedX = Math.min(x, window.innerWidth - menuRect.width - 10);
+        const adjustedY = Math.min(y, window.innerHeight - menuRect.height - 10);
+        
+        contextMenu.style.left = `${adjustedX}px`;
+        contextMenu.style.top = `${adjustedY}px`;
+    }
+    
+    hideMainPanelVideoContextMenu() {
+        document.getElementById('mainPanelVideoContextMenu').style.display = 'none';
+    }
+    
+    switchBackToMiniPlayer() {
+        this.moveVideoBackToDefault();
+        this.hideMainPanelVideoContextMenu();
+    }
+    
+    playVideoInMainPanel() {
+        if (!this.videoInMainPanel) {
+            this.moveVideoToMainPanel();
+        }
+        this.hideVideoContextMenu();
+    }
+    
+    playVideoFullScreen() {
+        if (this.videoElement.requestFullscreen) {
+            this.videoElement.requestFullscreen();
+        }
+        this.hideVideoContextMenu();
+    }
+    
+    moveVideoToMainPanel() {
+        this.videoInMainPanel = true;
+        const leftPanel = document.getElementById('leftPanel');
+        const currentTime = this.videoElement.currentTime;
+        const wasPlaying = !this.videoElement.paused;
+        
+        // Pause original video and audio completely
+        this.videoElement.pause();
+        this.audio.pause();
+        this.audio.src = '';
+        
+        // Hide music container and show album cover
+        document.getElementById('musicContainer').style.display = 'none';
+        this.albumCover.style.display = 'flex';
+        
+        // Create main panel video container
+        this.mainPanelVideo = document.createElement('div');
+        this.mainPanelVideo.className = 'main-panel-video';
+        
+        // Create new video element
+        const newVideo = document.createElement('video');
+        newVideo.src = this.videoElement.src;
+        newVideo.currentTime = currentTime;
+        newVideo.controls = false;
+        this.mainPanelVideo.appendChild(newVideo);
+        
+        // Add to main panel
+        leftPanel.appendChild(this.mainPanelVideo);
+        
+        // Hide original video player
+        this.videoPlayer.style.display = 'none';
+        
+        // Update video element reference
+        this.videoElement = newVideo;
+        
+        if (wasPlaying) {
+            this.videoElement.play();
+        }
+        
+        // Update event handlers
+        this.setupMainPanelVideoEvents(this.videoElement);
+        
+        // Sync volume with main control
+        this.videoElement.volume = this.audio.volume;
+        
+        // Add context menu for main panel video
+        this.videoElement.oncontextmenu = (e) => {
+            e.preventDefault();
+            this.showMainPanelVideoContextMenu(e.clientX, e.clientY);
+        };
+        
+        // Update main panel video when song changes
+        this.updateMainPanelVideo = (newVideoSrc) => {
+            if (this.videoInMainPanel && this.videoElement) {
+                const wasPlaying = !this.videoElement.paused;
+                this.videoElement.src = newVideoSrc;
+                this.videoElement.volume = this.audio.volume;
+                this.videoElement.style.display = 'block';
+                if (wasPlaying) {
+                    this.videoElement.play();
+                }
+            }
+        };
+        
+        // Show no video message in main panel
+        this.showNoVideoMessage = () => {
+            if (this.videoInMainPanel && this.mainPanelVideo) {
+                this.videoElement.style.display = 'none';
+                this.mainPanelVideo.innerHTML = `
+                    <div style="display: flex; align-items: center; justify-content: center; height: 100%; color: #fff; text-align: center; font-size: 18px; background: #1a1a1a;">
+                        <div>
+                            <p>No Video Attached</p>
+                            <p style="font-size: 14px; opacity: 0.7;">Double click on cover image to attach video</p>
+                        </div>
+                    </div>
+                `;
+            }
+        };
+        
+        this.showNotification('Video moved to main panel', 'info');
+    }
+    
+    moveVideoBackToDefault() {
+        if (this.videoInMainPanel && this.mainPanelVideo) {
+            const currentTime = this.videoElement.currentTime;
+            const wasPlaying = !this.videoElement.paused;
+            
+            // Pause main panel video and ensure audio is stopped
+            this.videoElement.pause();
+            this.audio.pause();
+            
+            // Get original video element
+            const originalVideo = this.videoPlayer.querySelector('video');
+            
+            // Restore video to original position
+            originalVideo.src = this.videoElement.src;
+            originalVideo.currentTime = currentTime;
+            
+            // Update video element reference
+            this.videoElement = originalVideo;
+            
+            if (wasPlaying) {
+                this.videoElement.play();
+            }
+            
+            // Remove main panel video
+            this.mainPanelVideo.remove();
+            this.mainPanelVideo = null;
+            this.videoInMainPanel = false;
+            
+            // Show music container and original video player
+            document.getElementById('musicContainer').style.display = 'flex';
+            this.videoPlayer.style.display = 'block';
+            
+            // Hide album cover since we're back in video mode
+            this.albumCover.style.display = 'none';
+        }
+    }
+    
+    setupMainPanelVideoEvents(videoEl) {
+        videoEl.ontimeupdate = () => this.updateTime();
+        videoEl.onended = () => this.playNext();
+        videoEl.onloadedmetadata = () => this.updateDuration();
+        videoEl.ondblclick = () => this.toggleVideoAspectRatio();
+    }
+    
 
     
     mergePlaylist() {
@@ -3191,8 +3375,14 @@ class MusicPlayer {
             const results = songsToSearch.map(song => ({
                 song,
                 score: this.calculateRelevanceScore(song, query)
-            })).filter(item => item.score > 0.3)
-              .sort((a, b) => b.score - a.score)
+            })).filter(item => item.score > 0.2)
+              .sort((a, b) => {
+                  // Sort by score first, then by title for consistent ordering
+                  if (Math.abs(a.score - b.score) < 0.01) {
+                      return a.song.title.localeCompare(b.song.title);
+                  }
+                  return b.score - a.score;
+              })
               .map(item => item.song);
             
             this.filteredSongs = results;
@@ -3202,62 +3392,103 @@ class MusicPlayer {
     
     calculateRelevanceScore(song, query) {
         const cleanQuery = this.cleanSearchText(query);
+        const queryWords = cleanQuery.split(' ').filter(w => w.length > 0);
+        
         const fields = [
-            { text: this.cleanSearchText(song.title), weight: 0.5 },
-            { text: this.cleanSearchText(song.artist), weight: 0.4 },
-            { text: this.cleanSearchText(song.album), weight: 0.2 }
+            { text: this.cleanSearchText(song.title), weight: 0.6 },
+            { text: this.cleanSearchText(song.artist), weight: 0.3 },
+            { text: this.cleanSearchText(song.album), weight: 0.1 }
         ];
         
-        let totalScore = 0;
+        let maxScore = 0;
         
         for (const field of fields) {
             if (field.text) {
-                const score = this.advancedMatch(field.text, cleanQuery) * field.weight;
-                totalScore += score;
+                const score = this.enhancedMatch(field.text, cleanQuery, queryWords) * field.weight;
+                maxScore = Math.max(maxScore, score);
             }
         }
         
-        return totalScore;
+        return maxScore;
     }
     
     cleanSearchText(text) {
         if (!text) return '';
         return text.toLowerCase()
-            .replace(/[^a-z0-9\s]/g, '')
+            .replace(/[^a-z0-9\s&]/g, ' ')  // Keep & for band names
             .replace(/\s+/g, ' ')
             .trim();
     }
     
-    advancedMatch(text, query) {
+    enhancedMatch(text, query, queryWords) {
         if (!text || !query) return 0;
         
         // Exact match gets highest score
         if (text === query) return 1.0;
-        if (text.includes(query)) return 0.9;
         
-        // Check if query matches start of text
-        if (text.startsWith(query)) return 0.85;
-        
-        // Word boundary matching
-        const words = text.split(' ');
-        for (const word of words) {
-            if (word === query) return 0.8;
-            if (word.startsWith(query)) return 0.7;
-            if (word.includes(query)) return 0.6;
+        // Full query contained in text
+        if (text.includes(query)) {
+            if (text.startsWith(query)) return 0.95;
+            return 0.9;
         }
         
-        // Jaro-Winkler similarity
-        const jaroScore = this.jaroWinkler(text, query);
-        if (jaroScore > 0.7) return jaroScore;
+        const textWords = text.split(' ').filter(w => w.length > 0);
+        let bestScore = 0;
         
-        // N-gram similarity
-        const ngramScore = this.ngramSimilarity(text, query, 2);
-        if (ngramScore > 0.5) return ngramScore * 0.7;
+        // Single word queries - prioritize exact word matches
+        if (queryWords.length === 1) {
+            const queryWord = queryWords[0];
+            for (const word of textWords) {
+                if (word === queryWord) return 0.85;
+                if (word.startsWith(queryWord)) {
+                    bestScore = Math.max(bestScore, 0.8);
+                } else if (word.includes(queryWord)) {
+                    bestScore = Math.max(bestScore, 0.6);
+                }
+            }
+        } else {
+            // Multi-word queries - check word combinations
+            let matchedWords = 0;
+            let exactMatches = 0;
+            
+            for (const queryWord of queryWords) {
+                let wordMatched = false;
+                for (const textWord of textWords) {
+                    if (textWord === queryWord) {
+                        exactMatches++;
+                        wordMatched = true;
+                        break;
+                    } else if (textWord.startsWith(queryWord)) {
+                        matchedWords++;
+                        wordMatched = true;
+                        break;
+                    } else if (textWord.includes(queryWord)) {
+                        matchedWords += 0.5;
+                        wordMatched = true;
+                        break;
+                    }
+                }
+                if (wordMatched) matchedWords++;
+            }
+            
+            const matchRatio = matchedWords / queryWords.length;
+            const exactRatio = exactMatches / queryWords.length;
+            
+            if (exactRatio > 0.8) return 0.9;
+            if (matchRatio > 0.8) return 0.8;
+            if (matchRatio > 0.6) return 0.7;
+            if (matchRatio > 0.4) return 0.5;
+            
+            bestScore = Math.max(bestScore, matchRatio * 0.6);
+        }
         
-        // Word-level matching
-        const wordScore = this.wordLevelMatch(text, query);
+        // Fallback to fuzzy matching only if no good matches found
+        if (bestScore < 0.3) {
+            const fuzzyScore = this.jaroWinkler(text, query);
+            if (fuzzyScore > 0.8) bestScore = Math.max(bestScore, fuzzyScore * 0.4);
+        }
         
-        return Math.max(jaroScore, ngramScore * 0.7, wordScore);
+        return bestScore;
     }
     
     jaroWinkler(s1, s2) {
