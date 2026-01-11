@@ -21,6 +21,8 @@ class MusicPlayer {
         this.currentPlaylist = null;
         this.playlistOrder = [];
         this.lyricsFontSize = 16;
+        this.floatingLyricsFontSize = 28;
+        this.floatingLyricsColor = '#ffffff';
         this.selectedSongs = new Set();
         this.selectionMode = false;
         this.scrollbarTimeouts = {};
@@ -1628,7 +1630,24 @@ class MusicPlayer {
         this.lyricsFontBtn.onclick = () => this.toggleFontPanel();
         this.fontDecrease.onclick = () => this.adjustFontSize(-2);
         this.fontIncrease.onclick = () => this.adjustFontSize(2);
-        this.fontSave.onclick = () => this.saveFontSettings();
+        
+        // Floating lyrics font controls
+        document.getElementById('floatFontDecrease').onclick = () => this.adjustFloatingFontSize(-2);
+        document.getElementById('floatFontIncrease').onclick = () => this.adjustFloatingFontSize(2);
+        
+        // Single save button for all settings
+        document.getElementById('saveAllFontSettings').onclick = () => this.saveAllFontSettings();
+        
+        // Color picker
+        document.querySelectorAll('.color-box').forEach(box => {
+            box.onclick = () => {
+                document.querySelectorAll('.color-box').forEach(b => b.style.border = 'none');
+                box.style.border = '2px solid #fff';
+                this.floatingLyricsColor = box.dataset.color;
+                this.applyFloatingLyricsColor();
+            };
+        });
+        
         this.loadFontSettings();
         
         // Show font button if lyrics are already visible
@@ -1747,10 +1766,50 @@ class MusicPlayer {
     }
     
     saveFontSettings() {
+        localStorage.setItem('vimusic-lyrics-font-size', this.lyricsFontSize.toString());
+    }
+    
+    saveAllFontSettings() {
+        localStorage.setItem('vimusic-lyrics-font-size', this.lyricsFontSize.toString());
+        localStorage.setItem('vimusic-floating-lyrics-font-size', this.floatingLyricsFontSize.toString());
+        localStorage.setItem('vimusic-floating-lyrics-color', this.floatingLyricsColor);
         this.lyricsFontControls.style.display = 'none';
         this.lyricsFontBtn.classList.remove('active');
-        localStorage.setItem('vimusic-lyrics-font-size', this.lyricsFontSize.toString());
-        this.showNotification(`Lyrics font size saved: ${this.lyricsFontSize}px`, 'success');
+        this.showNotification('All lyrics settings saved', 'success');
+    }
+    
+    adjustFloatingFontSize(change) {
+        this.floatingLyricsFontSize = Math.max(16, Math.min(48, this.floatingLyricsFontSize + change));
+        this.updateFloatingFontDisplay();
+        this.applyFloatingFontSize();
+    }
+    
+    updateFloatingFontDisplay() {
+        document.getElementById('floatFontSizeDisplay').textContent = `Size: ${this.floatingLyricsFontSize}px`;
+    }
+    
+    applyFloatingFontSize() {
+        ipcRenderer.send('update-floating-lyrics-style', {
+            fontSize: this.floatingLyricsFontSize
+        });
+    }
+    
+    applyFloatingLyricsColor() {
+        ipcRenderer.send('update-floating-lyrics-style', {
+            color: this.floatingLyricsColor
+        });
+    }
+    
+    applyFloatingLyricsSettings() {
+        ipcRenderer.send('update-floating-lyrics-style', {
+            fontSize: this.floatingLyricsFontSize,
+            color: this.floatingLyricsColor
+        });
+    }
+    
+    saveFloatingFontSettings() {
+        localStorage.setItem('vimusic-floating-lyrics-font-size', this.floatingLyricsFontSize.toString());
+        localStorage.setItem('vimusic-floating-lyrics-color', this.floatingLyricsColor);
     }
     
     loadFontSettings() {
@@ -1758,7 +1817,25 @@ class MusicPlayer {
         if (saved) {
             this.lyricsFontSize = parseInt(saved) || 16;
         }
+        
+        const savedFloatSize = localStorage.getItem('vimusic-floating-lyrics-font-size');
+        if (savedFloatSize) {
+            this.floatingLyricsFontSize = parseInt(savedFloatSize) || 28;
+        }
+        
+        const savedColor = localStorage.getItem('vimusic-floating-lyrics-color');
+        if (savedColor) {
+            this.floatingLyricsColor = savedColor;
+            document.querySelectorAll('.color-box').forEach(box => {
+                if (box.dataset.color === savedColor) {
+                    box.style.border = '2px solid #fff';
+                }
+            });
+        }
+        
         this.updateFontDisplay();
+        this.updateFloatingFontDisplay();
+        this.applyFloatingLyricsSettings();
     }
     
     toggleVideoMode() {

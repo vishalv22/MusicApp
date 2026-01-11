@@ -4,70 +4,208 @@
     <meta charset="UTF-8">
     <title>Floating Lyrics</title>
     <style>
-        body {
+        * {
             margin: 0;
-            padding: 20px;
-            background: rgba(0, 0, 0, 0.8);
-            color: white;
-            font-family: Arial, sans-serif;
-            font-size: 16px;
-            line-height: 1.5;
-            overflow: hidden;
-            -webkit-app-region: drag;
+            padding: 0;
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
         }
         
-        .song-info {
-            font-size: 12px;
-            opacity: 0.7;
-            margin-bottom: 10px;
+        body {
+            background: transparent;
+            color: white;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            overflow: hidden;
+            -webkit-app-region: drag;
+            padding: 10px;
+            will-change: transform;
+            transition: background 0.3s;
+        }
+        
+        body.interactive {
+            background: rgba(50, 50, 50, 0.3);
+            border-radius: 15px;
+            box-shadow: 0 0 30px rgba(0, 0, 0, 0.5);
+        }
+        
+        body.click-through {
             -webkit-app-region: no-drag;
+            pointer-events: none;
+        }
+        
+        #lyricsContainer {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            gap: 5px;
+            will-change: transform;
         }
         
         .lyric-line {
-            opacity: 0.5;
-            transition: all 0.3s ease;
-            margin: 5px 0;
+            opacity: 0;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            text-align: center;
+            font-size: 16px;
+            color: rgba(255, 255, 255, 0.4);
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.9);
+            padding: 5px 15px;
+            white-space: normal;
+            word-wrap: break-word;
+            max-width: 95%;
+            display: none;
+            will-change: transform, opacity, font-size;
+            transform: translateZ(0);
+            backface-visibility: hidden;
+            -webkit-font-smoothing: antialiased;
+        }
+        
+        .lyric-line.visible {
+            display: block;
+            opacity: 1;
         }
         
         .lyric-line.active {
-            opacity: 1;
-            font-weight: bold;
+            font-size: 28px;
+            font-weight: 700;
+            color: #ffffff;
+            text-shadow: 0 0 20px rgba(255, 255, 255, 0.5),
+                         2px 2px 8px rgba(0, 0, 0, 1);
+            transform: scale(1.1) translateZ(0);
+            transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1), font-size 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+        
+        .lyric-line.prev,
+        .lyric-line.next {
             font-size: 18px;
+            color: rgba(255, 255, 255, 0.6);
         }
     </style>
 </head>
 <body>
-    <div class="song-info" id="songInfo">No song playing</div>
-    <div id="lyricsContainer">No lyrics available</div>
+    <div id="lyricsContainer">
+        <div class="lyric-line">Waiting for lyrics...</div>
+    </div>
 
     <script>
         const { ipcRenderer } = require('electron');
+        let currentLyrics = [];
+        let currentIndex = -1;
+        let currentFontSize = 28;
+        let currentColor = '#ffffff';
+        let isInteractive = false;
+        
+        document.body.classList.add('click-through');
+        ipcRenderer.send('set-click-through', true);
+        
+        ipcRenderer.on('toggle-interactive', () => {
+            if (isInteractive) {
+                isInteractive = false;
+                document.body.classList.add('click-through');
+                document.body.classList.remove('interactive');
+                ipcRenderer.send('set-click-through', true);
+            } else {
+                isInteractive = true;
+                document.body.classList.remove('click-through');
+                document.body.classList.add('interactive');
+                ipcRenderer.send('set-click-through', false);
+            }
+        });
+        
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'L' && e.shiftKey && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                if (isInteractive) {
+                    isInteractive = false;
+                    document.body.classList.add('click-through');
+                    document.body.classList.remove('interactive');
+                    ipcRenderer.send('set-click-through', true);
+                } else {
+                    isInteractive = true;
+                    document.body.classList.remove('click-through');
+                    document.body.classList.add('interactive');
+                    ipcRenderer.send('set-click-through', false);
+                }
+            }
+        });
         
         ipcRenderer.on('update-lyric', (event, data) => {
-            if (data.songInfo) {
-                document.getElementById('songInfo').textContent = 
-                    `${data.songInfo.title} - ${data.songInfo.artist}`;
-            }
-            
             if (data.lyrics) {
-                const container = document.getElementById('lyricsContainer');
-                container.innerHTML = '';
-                
-                data.lyrics.forEach((lyric, index) => {
-                    const div = document.createElement('div');
-                    div.className = 'lyric-line';
-                    div.textContent = lyric.text;
-                    div.dataset.index = index;
-                    container.appendChild(div);
-                });
+                currentLyrics = data.lyrics;
+                renderLyrics();
             }
             
             if (data.currentIndex !== undefined) {
-                document.querySelectorAll('.lyric-line').forEach((line, index) => {
-                    line.classList.toggle('active', index === data.currentIndex);
-                });
+                currentIndex = data.currentIndex;
+                updateActiveLyric();
             }
         });
+        
+        ipcRenderer.on('update-style', (event, style) => {
+            if (style.fontSize !== undefined) {
+                currentFontSize = style.fontSize;
+            }
+            if (style.color !== undefined) {
+                currentColor = style.color;
+            }
+            applyStyleToActive();
+        });
+        
+        function applyStyleToActive() {
+            const activeLine = document.querySelector('.lyric-line.active');
+            if (activeLine) {
+                activeLine.style.fontSize = `${currentFontSize}px`;
+                activeLine.style.color = currentColor;
+            }
+        }
+        
+        function renderLyrics() {
+            const container = document.getElementById('lyricsContainer');
+            container.innerHTML = '';
+            
+            currentLyrics.forEach((lyric, index) => {
+                const div = document.createElement('div');
+                div.className = 'lyric-line';
+                div.textContent = lyric.text;
+                div.dataset.index = index;
+                container.appendChild(div);
+            });
+        }
+        
+        function updateActiveLyric() {
+            requestAnimationFrame(() => {
+                const lines = document.querySelectorAll('.lyric-line');
+                
+                lines.forEach((line, index) => {
+                    line.classList.remove('active', 'prev', 'next', 'visible');
+                    line.style.fontSize = '';
+                    line.style.color = '';
+                    
+                    // Show current line
+                    if (index === currentIndex) {
+                        line.classList.add('active', 'visible');
+                        line.style.fontSize = `${currentFontSize}px`;
+                        line.style.color = currentColor;
+                    }
+                    // Show previous line
+                    else if (index === currentIndex - 1) {
+                        line.classList.add('prev', 'visible');
+                    }
+                    // Show next line
+                    else if (index === currentIndex + 1) {
+                        line.classList.add('next', 'visible');
+                    }
+                });
+                
+                // Auto-scroll to active line
+                const activeLine = document.querySelector('.lyric-line.active');
+                if (activeLine) {
+                    activeLine.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            });
+        }
     </script>
 </body>
 </html>

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const mm = require('music-metadata');
@@ -125,7 +125,19 @@ function createWindow() {
 // Enable hardware acceleration for better performance
 // app.disableHardwareAcceleration(); // Commented out to improve performance
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+    createWindow();
+    
+    globalShortcut.register('CommandOrControl+Shift+L', () => {
+        if (floatingWindow && !floatingWindow.isDestroyed()) {
+            floatingWindow.webContents.send('toggle-interactive');
+        }
+    });
+});
+app.on('will-quit', () => {
+    globalShortcut.unregisterAll();
+});
+
 app.on('window-all-closed', () => process.platform !== 'darwin' && app.quit());
 app.on('activate', () => BrowserWindow.getAllWindows().length === 0 && createWindow());
 
@@ -506,9 +518,8 @@ ipcMain.on('create-floating-lyrics', (event) => {
     }
     
     floatingWindow = new BrowserWindow({
-        width: 700,
-        height: 140,
-
+        width: 1200,
+        height: 180,
         frame: false,
         transparent: true,
         alwaysOnTop: true,
@@ -518,8 +529,11 @@ ipcMain.on('create-floating-lyrics', (event) => {
         webPreferences: {
             nodeIntegration: true,
             contextIsolation: false
-        }
+        },
+        show: false
     });
+    
+    floatingWindow.setIgnoreMouseEvents(true, { forward: true });
     
     // Force always on top periodically with cleanup
     const alwaysOnTopInterval = setInterval(() => {
@@ -531,6 +545,11 @@ ipcMain.on('create-floating-lyrics', (event) => {
     }, 2000);
     
     floatingWindow.loadFile('floating-lyrics.html');
+    
+    // Show window after loading
+    floatingWindow.once('ready-to-show', () => {
+        floatingWindow.show();
+    });
     
     // Notify main window that floating window is ready
     floatingWindow.webContents.once('did-finish-load', () => {
@@ -578,6 +597,18 @@ ipcMain.on('create-floating-lyrics', (event) => {
 ipcMain.on('update-floating-lyrics', (event, data) => {
     if (floatingWindow) {
         floatingWindow.webContents.send('update-lyric', data);
+    }
+});
+
+ipcMain.on('update-floating-lyrics-style', (event, style) => {
+    if (floatingWindow) {
+        floatingWindow.webContents.send('update-style', style);
+    }
+});
+
+ipcMain.on('set-click-through', (event, enabled) => {
+    if (floatingWindow && !floatingWindow.isDestroyed()) {
+        floatingWindow.setIgnoreMouseEvents(enabled);
     }
 });
 

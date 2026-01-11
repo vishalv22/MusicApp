@@ -401,10 +401,44 @@
                 </div>
                 
                 <div class="lyrics-font-controls" id="lyricsFontControls" style="display: none;">
-                    <button class="timing-btn" id="fontDecrease">-</button>
-                    <span class="timing-offset" id="fontSizeDisplay">Size: 16px</span>
-                    <button class="timing-btn" id="fontIncrease">+</button>
-                    <button class="timing-btn" id="fontSave" style="background: #27ae60;">✓</button>
+                    <div class="font-section">
+                        <div class="font-section-title" style="display: flex; justify-content: center; align-items: center; position: relative;">
+                            <span>Lyrics Panel Font Size</span>
+                            <button class="timing-btn" id="saveAllFontSettings" style="background: #27ae60; position: absolute; right: 0;">✔</button>
+                        </div>
+                        <div class="font-controls-row">
+                            <button class="timing-btn" id="fontDecrease">-</button>
+                            <span class="timing-offset" id="fontSizeDisplay">Size: 16px</span>
+                            <button class="timing-btn" id="fontIncrease">+</button>
+                        </div>
+                    </div>
+                    
+                    <div class="font-section" style="padding-bottom: 5px; border-bottom: none;">
+                        <div class="font-section-title">Floating Lyrics Font Size</div>
+                        <div class="font-controls-row">
+                            <button class="timing-btn" id="floatFontDecrease">-</button>
+                            <span class="timing-offset" id="floatFontSizeDisplay">Size: 28px</span>
+                            <button class="timing-btn" id="floatFontIncrease">+</button>
+                        </div>
+                    </div>
+                    
+                    <div class="font-section" style="padding-top: 5px; border-top: none;">
+                        <div class="font-section-title">Floating Lyrics Font Color</div>
+                        <div class="color-grid" id="colorGrid">
+                            <div class="color-box" data-color="#44444E" style="background: #44444E;"></div>
+                            <div class="color-box" data-color="#715A5A" style="background: #715A5A;"></div>
+                            <div class="color-box" data-color="#BBDCE5" style="background: #BBDCE5;"></div>
+                            <div class="color-box" data-color="#FDCFFA" style="background: #FDCFFA;"></div>
+                            <div class="color-box" data-color="#A8BBA3" style="background: #A8BBA3;"></div>
+                            <div class="color-box" data-color="#C4A484" style="background: #C4A484;"></div>
+                            <div class="color-box" data-color="#B7E5CD" style="background: #B7E5CD;"></div>
+                            <div class="color-box" data-color="#A7AAE1" style="background: #A7AAE1;"></div>
+                            <div class="color-box" data-color="#D9E9CF" style="background: #D9E9CF;"></div>
+                            <div class="color-box" data-color="#CBDCEB" style="background: #CBDCEB;"></div>
+                            <div class="color-box" data-color="#7A7A73" style="background: #7A7A73;"></div>
+                            <div class="color-box" data-color="#DDEB9D" style="background: #DDEB9D;"></div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>

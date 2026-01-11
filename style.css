@@ -1214,29 +1214,104 @@ body.light-theme .playlist-details-panel::after {
 .lyrics-timing-controls,
 .lyrics-font-controls {
     display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin-top: 10px;
+    padding: 15px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 8px;
+    max-width: 100%;
+}
+
+.font-section {
+    padding: 15px 0;
+}
+
+.font-section:not(:last-child) {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.font-section-title {
+    font-size: 12px;
+    color: #888;
+    margin-bottom: 12px;
+    text-align: center;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 500;
+}
+
+.font-controls-row {
+    display: flex;
     align-items: center;
     gap: 8px;
-    margin-top: 10px;
-    padding: 10px;
-    background: rgba(255, 255, 255, 0.05);
-    border-radius: 6px;
     justify-content: center;
+}
+
+.color-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 0 30px;
+    max-width: 100%;
+    justify-content: center;
+}
+
+.color-box {
+    width: 32px;
+    height: 32px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    border: 2px solid transparent;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+    flex-shrink: 0;
+}
+
+.color-box:hover {
+    transform: scale(1.08);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+}
+
+.color-box.selected {
+    border-color: #fff;
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.4), 0 4px 8px rgba(0, 0, 0, 0.3);
+    transform: scale(1.05);
+}
+
+body.light-theme .lyrics-font-controls {
+    background: rgba(0, 0, 0, 0.03);
+}
+
+body.light-theme .font-section:not(:last-child) {
+    border-bottom-color: rgba(0, 0, 0, 0.1);
+}
+
+body.light-theme .font-section-title {
+    color: #666;
+}
+
+body.light-theme .color-box.selected {
+    border-color: #222;
+    box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.3), 0 4px 8px rgba(0, 0, 0, 0.2);
 }
 
 .timing-btn {
     background: #2a2a2a;
     border: none;
-    padding: 6px 12px;
-    border-radius: 4px;
+    padding: 8px 14px;
+    border-radius: 6px;
     cursor: pointer;
     color: #fff;
-    font-size: 12px;
+    font-size: 13px;
     transition: all 0.3s;
-    min-width: 60px;
+    min-width: 50px;
+    font-weight: 500;
 }
 
 .timing-btn:hover:not(:disabled) {
     background: #333;
+    transform: translateY(-1px);
 }
 
 .timing-btn:disabled {
@@ -1246,10 +1321,11 @@ body.light-theme .playlist-details-panel::after {
 }
 
 .timing-offset {
-    font-size: 11px;
-    color: #888;
-    min-width: 80px;
+    font-size: 13px;
+    color: #aaa;
+    min-width: 90px;
     text-align: center;
+    font-weight: 500;
 }
 
 .lyrics-header h3 {
