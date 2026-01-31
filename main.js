@@ -5,6 +5,18 @@ const mm = require('music-metadata');
 
 let mainWindow;
 
+ipcMain.handle('get-app-version', () => {
+    try {
+        return app.getVersion();
+    } catch (e) {
+        return null;
+    }
+});
+
+// Allow Chromium to present above 60fps on high-refresh displays (e.g. 90Hz).
+// This matters for WebGL animations (the visualizer); we still pace rendering in the renderer if needed.
+app.commandLine.appendSwitch('disable-frame-rate-limit');
+
 function createWindow() {
     // Load saved window size and position
     const settingsPath = path.join(getUserDataPath(), 'settings.json');
@@ -255,13 +267,17 @@ ipcMain.handle('get-music-files', async () => {
         try {
             const metadata = await mm.parseFile(filePath);
             const common = metadata.common;
-            
+            const format = metadata.format || {};
+             
             const musicTitle = common.title || file.replace(/\.[^/.]+$/, '');
             
             // Get file stats for dateAdded
             const stats = fs.statSync(filePath);
             const dateAdded = fileTimestamps[file] || stats.birthtime || stats.mtime;
             
+            const sampleRate = Number(format.sampleRate);
+            const bitDepth = Number(format.bitsPerSample);
+
             musicFiles.push({
                 name: file,
                 baseName: file.replace(/\.[^/.]+$/, ''),
@@ -270,6 +286,9 @@ ipcMain.handle('get-music-files', async () => {
                 artist: common.artist || 'Unknown Artist',
                 album: common.album || 'Unknown Album',
                 duration: metadata.format.duration || 0,
+                lossless: typeof format.lossless === 'boolean' ? format.lossless : null,
+                sampleRate: Number.isFinite(sampleRate) ? sampleRate : null,
+                bitDepth: Number.isFinite(bitDepth) ? bitDepth : null,
                 picture: common.picture && common.picture[0] ? common.picture[0].data : null,
                 dateAdded: dateAdded
             });
@@ -289,6 +308,9 @@ ipcMain.handle('get-music-files', async () => {
                 artist: 'Unknown Artist',
                 album: 'Unknown Album',
                 duration: 0,
+                lossless: null,
+                sampleRate: null,
+                bitDepth: null,
                 picture: null,
                 dateAdded: dateAdded
             });
@@ -852,6 +874,3 @@ ipcMain.handle('remove-attached-video', async (event, songBaseName) => {
         return false;
     }
 });
-
-
-

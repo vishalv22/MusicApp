@@ -25,10 +25,17 @@ class MusicPlayer {
         this.floatingLyricsColor = '#ffffff';
         this.selectedSongs = new Set();
         this.selectionMode = false;
+        this.selectionAnchorDisplayIndex = null;
+        this.songIndexLookup = new Map();
         this.scrollbarTimeouts = {};
         this.shuffleHistory = [];
         this.shuffleQueue = [];
         this.currentCategory = 'all';
+
+        // Playback context should not change just because the user is browsing a different list.
+        // It updates only when the user plays a song from another list or explicitly queues from another list.
+        this.playbackContext = { type: 'all', playlistName: null, category: 'all' };
+        this.pendingShuffleRegenerate = false;
         this.crossfadeInterval = null;
         this.originalVolume = 1;
         this.nextAudio = null;
@@ -40,12 +47,32 @@ class MusicPlayer {
         this.audioContext = null;
         this.sourceNode = null;
         this.gainNode = null;
+        this.analyserNode = null;
         this.eqFilters = [];
         this.isEqInitialized = false;
+
+        // Visualizer overlay
+        this.visualizer = null;
+        this.visualizerCanvas = null;
+        this.albumCoverMedia = null;
+        this.visualizerColorRequestId = 0;
+        this.visualizerColorCanvas = null;
+        this.visualizerBtn = null;
+        this.visualizerPanel = null;
+        this.isVisualizerViewActive = false;
+        this.visualizerPrevPanelState = null;
+
+        // Queue panel (shown when lyrics are hidden)
+        this.queuePanel = null;
+        this.queueList = null;
+        this.queueMeta = null;
+        this.queueCoverUrlCache = new Map();
 
         
         this.initElements();
         this.bindEvents();
+        this.initVisualizer();
+        this.updateMediaAvailabilityButtons(null);
         // Defer music loading to reduce startup delay
         setTimeout(() => this.loadMusic(), 50);
     }
@@ -63,26 +90,41 @@ class MusicPlayer {
         // Use more efficient selector with caching
         const songItem = document.querySelector(`[data-song-index="${songIndex}"]`)?.closest('.song-item');
         if (!songItem) return;
-        
-        const badge = songItem.querySelector('.badge');
+
         const song = this.songs[songIndex];
-        if (badge && song) {
-            // Reset all classes
-            badge.className = 'badge';
-            
-            if (hasLyrics && song.attachedVideo) {
-                badge.classList.add('has-lyrics-video');
-                badge.textContent = '♪';
-            } else if (song.attachedVideo && !hasLyrics) {
-                badge.classList.add('has-video');
-                badge.textContent = '♫';
-            } else if (hasLyrics) {
-                badge.classList.add('has-lyrics');
-                badge.textContent = '♪';
-            } else {
-                badge.textContent = '♫';
-            }
+        if (!song) return;
+
+        const lyricsAvailable = typeof hasLyrics === 'boolean' ? hasLyrics : !!song.hasLyrics;
+        const videoAvailable = !!song.isVideo || !!song.attachedVideo || !!song.youtubeVideo;
+        const dotMode = lyricsAvailable && videoAvailable ? 'both' : lyricsAvailable ? 'lyrics' : videoAvailable ? 'video' : null;
+
+        const nameEl = songItem.querySelector('.song-name');
+        if (!nameEl) return;
+
+        let dot = nameEl.querySelector('.song-detail-dot');
+        if (!dotMode) {
+            if (dot) dot.remove();
+            return;
         }
+
+        if (!dot) {
+            dot = document.createElement('span');
+            dot.className = 'song-detail-dot';
+            nameEl.appendChild(dot);
+        }
+
+        // Migration: older builds used a `lyrics` class which conflicts with the right-panel `.lyrics` styles.
+        dot.classList.remove('lyrics');
+
+        dot.classList.toggle('has-lyrics', dotMode === 'lyrics');
+        dot.classList.toggle('video', dotMode === 'video');
+        dot.classList.toggle('both', dotMode === 'both');
+        dot.title =
+            dotMode === 'both'
+                ? 'Lyrics + Video available'
+                : dotMode === 'lyrics'
+                  ? 'Lyrics available'
+                  : 'Video available';
     }
 
     initElements() {
@@ -121,11 +163,16 @@ class MusicPlayer {
         this.settingsBtn = document.getElementById('settingsBtn');
         this.settingsPanel = document.getElementById('settingsPanel');
         this.musicContainer = document.querySelector('.music-container');
+        this.selectModeBtn = document.getElementById('selectModeBtn');
+        this.selectAllSongs = document.getElementById('selectAllSongs');
+        this.headerSelect = document.getElementById('headerSelect');
     }
 
     initDisplayElements() {
         this.timeDisplay = document.getElementById('time');
         this.albumCover = document.getElementById('albumCover');
+        this.albumCoverMedia = document.getElementById('albumCoverMedia');
+        this.visualizerCanvas = document.getElementById('visualizerCanvas');
         this.detailTitle = document.getElementById('detailTitle');
         this.detailArtist = document.getElementById('detailArtist');
         this.detailDuration = document.getElementById('detailDuration');
@@ -134,6 +181,7 @@ class MusicPlayer {
         this.videoPlayer = document.getElementById('videoPlayer');
         this.videoElement = document.getElementById('videoElement');
         this.videoBtn = document.getElementById('videoBtn');
+        this.visualizerBtn = document.getElementById('visualizerBtn');
         this.lyricsToggleBtn = document.getElementById('lyricsToggleBtn');
         this.offsetToggleBtn = document.getElementById('offsetToggleBtn');
         this.timingBackward = document.getElementById('timingBackward');
@@ -155,8 +203,12 @@ class MusicPlayer {
             leftPanel: 'leftPanel',
             rightPanel: 'rightPanel', 
             musicList: 'musicList',
+            visualizerPanel: 'visualizerPanel',
             songsDiv: 'songs',
             lyricsDiv: 'lyrics',
+            queuePanel: 'queuePanel',
+            queueList: 'queueList',
+            queueMeta: 'queueMeta',
 
             floatLyricsBtn: 'floatLyricsBtn',
             contextMenu: 'contextMenu',
@@ -168,6 +220,227 @@ class MusicPlayer {
         
         Object.keys(elements).forEach(key => {
             this[key] = document.getElementById(elements[key]);
+        });
+    }
+
+    initVisualizer() {
+        if (this.visualizer || !this.visualizerCanvas) return;
+        if (!window.NCSVisualizerOverlay) {
+            console.warn('[Visualizer] visualizer.js not loaded; skipping visualizer initialization');
+            return;
+        }
+
+        try {
+            this.visualizer = new window.NCSVisualizerOverlay(this.visualizerCanvas);
+            this.visualizer.setColor(this.getDefaultVisualizerColor());
+            this.visualizer.setSeed(1);
+            this.applyVisualizerFpsSetting();
+        } catch (error) {
+            console.error('[Visualizer] Failed to initialize visualizer:', error);
+            this.visualizer = null;
+        }
+    }
+
+    startVisualizer() {
+        if (!this.visualizer || !this.isVisualizerViewActive || this.isVideoMode) return;
+        if (!this.audio || this.audio.paused) return;
+        if (this.audioContext && typeof this.audioContext.resume === 'function') {
+            this.audioContext.resume().catch(() => {});
+        }
+        this.visualizer.start();
+    }
+
+    stopVisualizer() {
+        if (!this.visualizer) return;
+        this.visualizer.stop();
+    }
+
+    toggleVisualizerView() {
+        if (this.isVisualizerViewActive) {
+            this.disableVisualizerView(true);
+        } else {
+            this.enableVisualizerView();
+        }
+    }
+
+    enableVisualizerView() {
+        if (this.isVisualizerViewActive) return;
+        if (!this.visualizerPanel || !this.visualizerCanvas) {
+            console.warn('[Visualizer] visualizer panel not found; cannot enable visualizer view');
+            return;
+        }
+
+        this.initVisualizer();
+
+        const musicContainer = document.getElementById('musicContainer');
+        const settingsPanel = document.getElementById('settingsPanel');
+        const playlistDetailsPanel = document.getElementById('playlistDetailsPanel');
+
+        this.visualizerPrevPanelState = {
+            musicContainerDisplay: musicContainer?.style.display ?? '',
+            settingsPanelDisplay: settingsPanel?.style.display ?? '',
+            playlistDetailsPanelDisplay: playlistDetailsPanel?.style.display ?? '',
+            mainPanelVideoDisplay: this.mainPanelVideo?.style.display ?? null,
+            leftPanelHadDownloadActive: this.leftPanel?.classList.contains('download-active') ?? false,
+            currentView: this.currentView ?? 'music',
+            settingsBtnActive: this.settingsBtn?.classList.contains('active') ?? false
+        };
+
+        this.isVisualizerViewActive = true;
+        this.currentView = 'visualizer';
+
+        if (this.visualizerBtn) this.visualizerBtn.classList.add('active');
+        if (this.leftPanel) this.leftPanel.classList.add('visualizer-view-active');
+
+        if (musicContainer) musicContainer.style.display = 'none';
+        if (settingsPanel) settingsPanel.style.display = 'none';
+        if (playlistDetailsPanel) playlistDetailsPanel.style.display = 'none';
+        if (this.mainPanelVideo) this.mainPanelVideo.style.display = 'none';
+
+        this.visualizerPanel.style.display = 'block';
+
+        // Ensure WebAudio graph exists before starting the renderer.
+        this.initializeAudioContext();
+        if (this.visualizer) this.visualizer.requestResize();
+        this.startVisualizer();
+    }
+
+    disableVisualizerView(restorePreviousPanels) {
+        if (!this.isVisualizerViewActive) return;
+
+        this.stopVisualizer();
+
+        this.isVisualizerViewActive = false;
+        if (this.visualizerBtn) this.visualizerBtn.classList.remove('active');
+        if (this.leftPanel) this.leftPanel.classList.remove('visualizer-view-active');
+        if (this.visualizerPanel) this.visualizerPanel.style.display = 'none';
+
+        const prev = this.visualizerPrevPanelState;
+        this.visualizerPrevPanelState = null;
+
+        if (!restorePreviousPanels || !prev) return;
+
+        const musicContainer = document.getElementById('musicContainer');
+        const settingsPanel = document.getElementById('settingsPanel');
+        const playlistDetailsPanel = document.getElementById('playlistDetailsPanel');
+
+        if (musicContainer) musicContainer.style.display = prev.musicContainerDisplay;
+        if (settingsPanel) settingsPanel.style.display = prev.settingsPanelDisplay;
+        if (playlistDetailsPanel) playlistDetailsPanel.style.display = prev.playlistDetailsPanelDisplay;
+
+        if (this.mainPanelVideo && prev.mainPanelVideoDisplay !== null) {
+            this.mainPanelVideo.style.display = prev.mainPanelVideoDisplay;
+        }
+
+        if (this.leftPanel) {
+            this.leftPanel.classList.toggle('download-active', !!prev.leftPanelHadDownloadActive);
+        }
+
+        if (this.settingsBtn) {
+            this.settingsBtn.classList.toggle('active', !!prev.settingsBtnActive);
+        }
+
+        this.currentView = prev.currentView ?? 'music';
+    }
+
+    getDefaultVisualizerColor() {
+        if (document.body.classList.contains('light-theme')) return { r: 20, g: 20, b: 20 };
+        return { r: 255, g: 107, b: 107 };
+    }
+
+    hashStringToSeed(str) {
+        if (!str) return 1;
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) {
+            hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
+        }
+        return hash | 0;
+    }
+
+    boostVisualizerColorForVisibility(color) {
+        if (!color) return this.getDefaultVisualizerColor();
+
+        let { r, g, b } = color;
+        r = Math.max(0, Math.min(255, r | 0));
+        g = Math.max(0, Math.min(255, g | 0));
+        b = Math.max(0, Math.min(255, b | 0));
+
+        const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+        if (luminance < 0.35) {
+            // Blend with white to keep particles visible on dark covers.
+            r = Math.round(r * 0.4 + 255 * 0.6);
+            g = Math.round(g * 0.4 + 255 * 0.6);
+            b = Math.round(b * 0.4 + 255 * 0.6);
+        }
+
+        return { r, g, b };
+    }
+
+    updateVisualizerColorFromImageUrl(imageUrl) {
+        if (!this.visualizer || !imageUrl) return;
+
+        const requestId = ++this.visualizerColorRequestId;
+        this.extractAverageColorFromImageUrl(imageUrl).then(color => {
+            if (requestId !== this.visualizerColorRequestId) return;
+            this.visualizer.setColor(this.boostVisualizerColorForVisibility(color));
+        });
+    }
+
+    extractAverageColorFromImageUrl(imageUrl) {
+        return new Promise(resolve => {
+            const img = new Image();
+            img.onload = () => {
+                const size = 32;
+                if (!this.visualizerColorCanvas) this.visualizerColorCanvas = document.createElement('canvas');
+                const canvas = this.visualizerColorCanvas;
+                canvas.width = size;
+                canvas.height = size;
+
+                const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                if (!ctx) {
+                    resolve(this.getDefaultVisualizerColor());
+                    return;
+                }
+
+                ctx.clearRect(0, 0, size, size);
+                ctx.drawImage(img, 0, 0, size, size);
+
+                let data;
+                try {
+                    data = ctx.getImageData(0, 0, size, size).data;
+                } catch {
+                    resolve(this.getDefaultVisualizerColor());
+                    return;
+                }
+
+                let r = 0;
+                let g = 0;
+                let b = 0;
+                let count = 0;
+
+                for (let i = 0; i < data.length; i += 4) {
+                    const a = data[i + 3];
+                    if (a < 32) continue;
+                    r += data[i];
+                    g += data[i + 1];
+                    b += data[i + 2];
+                    count++;
+                }
+
+                if (!count) {
+                    resolve(this.getDefaultVisualizerColor());
+                    return;
+                }
+
+                resolve({
+                    r: Math.round(r / count),
+                    g: Math.round(g / count),
+                    b: Math.round(b / count)
+                });
+            };
+
+            img.onerror = () => resolve(this.getDefaultVisualizerColor());
+            img.src = imageUrl;
         });
     }
 
@@ -196,6 +469,20 @@ class MusicPlayer {
         this.audio.ontimeupdate = () => this.updateTime();
         this.audio.onended = () => this.playNext();
         this.audio.onloadedmetadata = () => this.updateDuration();
+        this.audio.onplay = () => {
+            if (!this.isVideoMode) {
+                this.isPlaying = true;
+                this.playPauseImg.src = 'icons/pause.png';
+                this.startVisualizer();
+            }
+        };
+        this.audio.onpause = () => {
+            if (!this.isVideoMode) {
+                this.isPlaying = false;
+                this.playPauseImg.src = 'icons/play.png';
+                this.stopVisualizer();
+            }
+        };
         
         // Video event handlers
         this.videoElement.ontimeupdate = () => this.updateTime();
@@ -227,11 +514,15 @@ class MusicPlayer {
         this.setupFontControls();
         this.setupResizer();
         this.setupSortMenu();
+        this.setupSelectionUi();
         this.setupPlaylists();
         this.setupVisibilityHandler();
+        this.setupPlayerBarSizing();
         this.setupScrollbarTimeout();
         this.setupSettings();
+        this.setupSongContextMenuDelegation();
         this.loadSettings();
+        this.applyLyricsVisibilityPreference();
         const volume = this.settings.volume || 1;
         this.audio.volume = volume;
         this.videoElement.volume = volume;
@@ -239,6 +530,9 @@ class MusicPlayer {
     }
 
     async loadMusic() {
+        if (this.selectionMode || this.selectedSongs.size > 0) {
+            this.disableSelectionMode();
+        }
         this.musicList.innerHTML = '<div id="songs"></div>';
         this.songsDiv = document.getElementById('songs');
         
@@ -277,6 +571,7 @@ class MusicPlayer {
             this.loadRatings();
             // Sort by rating on refresh
             this.songs.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+            this.rebuildSongIndexLookup();
             
 
             
@@ -290,7 +585,7 @@ class MusicPlayer {
             this.showNotification(`Loaded ${this.songs.length} files`, 'success');
             
             // Resume last played song by finding it by name
-            if (this.settings.lastSongName) {
+            if (this.settings.resumeLastSong !== false && this.settings.lastSongName) {
                 const songIndex = this.songs.findIndex(song => song.name === this.settings.lastSongName);
                 if (songIndex >= 0) {
                     this.selectSong(songIndex, false); // false = don't auto-play
@@ -313,11 +608,28 @@ class MusicPlayer {
         }
     }
 
+    rebuildSongIndexLookup() {
+        this.songIndexLookup = new Map();
+        if (!Array.isArray(this.songs)) return;
+
+        this.songs.forEach((song, index) => {
+            if (song) this.songIndexLookup.set(song, index);
+        });
+    }
+
+    getSongIndexForSong(song) {
+        if (!song) return -1;
+        const idx = this.songIndexLookup?.get(song);
+        if (Number.isInteger(idx)) return idx;
+        return this.songs.indexOf(song);
+    }
+
     displaySongs() {
         this.currentPlaylist = null;
         this.hidePlaylistDetails();
         this.filteredSongs = [...this.songs];
         this.displayFilteredSongs();
+        this.renderQueuePanelIfVisible();
     }
     
     generateStars(rating) {
@@ -391,6 +703,28 @@ class MusicPlayer {
         }
         this.currentSongIndex = index;
         const song = this.songs[index];
+
+        if (this.shuffleMode) {
+            // If playback context changed while shuffling, regenerate once we land on a song within that context.
+            if (this.pendingShuffleRegenerate) {
+                const contextSongs = this.getContextSongs();
+                if (Array.isArray(contextSongs) && contextSongs.includes(song)) {
+                    this.generateShuffleQueue();
+                    this.pendingShuffleRegenerate = false;
+                }
+            }
+
+            // Ensure the currently playing song isn't present in the upcoming shuffle queue.
+            if (Array.isArray(this.shuffleQueue) && this.shuffleQueue.length > 0) {
+                const idx = this.shuffleQueue.indexOf(this.currentSongIndex);
+                if (idx !== -1) this.shuffleQueue.splice(idx, 1);
+            }
+        }
+
+        if (this.visualizer) {
+            const seedInput = song.path || song.baseName || song.name || `${index}`;
+            this.visualizer.setSeed(this.hashStringToSeed(seedInput));
+        }
         
         // Save last played song by name instead of index
         this.settings.lastSongIndex = index;
@@ -461,22 +795,25 @@ class MusicPlayer {
         
         // Show album cover if not in video mode OR if video is in main panel
         if (!this.isVideoMode || this.videoInMainPanel) {
+            const coverContainer = this.albumCoverMedia || this.albumCover;
             if (song.picture) {
                 const blob = new Blob([song.picture]);
                 this.currentImageUrl = URL.createObjectURL(blob);
-                this.albumCover.innerHTML = '';
+                coverContainer.innerHTML = '';
                 this.albumCover.style.display = 'flex';
                 this.albumCover.style.alignItems = 'center';
                 this.albumCover.style.justifyContent = 'center';
                 const img = document.createElement('img');
                 img.src = this.currentImageUrl;
                 img.alt = 'Album Cover';
-                this.albumCover.appendChild(img);
+                coverContainer.appendChild(img);
+                this.updateVisualizerColorFromImageUrl(this.currentImageUrl);
             } else {
-                this.albumCover.innerHTML = '<div class="cover-placeholder">🎵</div>';
+                coverContainer.innerHTML = '<div class="cover-placeholder">🎵</div>';
                 this.albumCover.style.display = 'flex';
                 this.albumCover.style.alignItems = 'center';
                 this.albumCover.style.justifyContent = 'center';
+                if (this.visualizer) this.visualizer.setColor(this.getDefaultVisualizerColor());
             }
             
             // Hide video player when showing album cover
@@ -572,6 +909,9 @@ class MusicPlayer {
                 this.play();
             }
         }
+
+        this.updateMediaAvailabilityButtons(song);
+        this.renderQueuePanelIfVisible();
     }
 
     parseLyrics(text) {
@@ -646,15 +986,18 @@ class MusicPlayer {
             console.error('Playback failed:', error);
             this.isPlaying = false;
             this.playPauseImg.src = 'icons/play.png';
+            this.stopVisualizer();
         });
         this.isPlaying = true;
         this.playPauseImg.src = 'icons/pause.png';
+        this.startVisualizer();
     }
 
     pause() {
         this.audio.pause();
         this.isPlaying = false;
         this.playPauseImg.src = 'icons/play.png';
+        this.stopVisualizer();
         
         // Clear crossfade interval
         if (this.crossfadeInterval) {
@@ -667,6 +1010,7 @@ class MusicPlayer {
         // Ensure audio is completely stopped
         this.audio.pause();
         this.audio.src = '';
+        this.stopVisualizer();
         
         if (this.videoElement.readyState >= 2) {
             this.videoElement.play().catch(error => {
@@ -690,6 +1034,7 @@ class MusicPlayer {
         this.videoElement.pause();
         this.isPlaying = false;
         this.playPauseImg.src = 'icons/play.png';
+        this.stopVisualizer();
     }
     
     showVideoPlayer() {
@@ -1027,6 +1372,10 @@ class MusicPlayer {
     }
     
     openFloatingLyrics() {
+        if (this.floatLyricsBtn?.disabled) {
+            this.showNotification('No lyrics available for this song', 'info');
+            return;
+        }
         // Check if floating window exists, if so close it
         ipcRenderer.invoke('is-floating-window-open').then(isOpen => {
             if (isOpen) {
@@ -1053,33 +1402,75 @@ class MusicPlayer {
     }
     
     setupContextMenu() {
-        // Global click handler to hide context menus
-        document.addEventListener('click', (e) => {
+        // Cache context menus for centralized open/close behavior
+        this.contextMenus = Array.from(document.querySelectorAll('.context-menu'));
+        this.activeContextMenu = null;
+        this.submenuStates = new WeakMap();
+
+        // Prevent native context menu inside custom menus
+        this.contextMenus.forEach(menu => {
+            menu.addEventListener('contextmenu', (e) => e.preventDefault());
+            this.setupSubmenuHoverIntent(menu);
+        });
+
+        // Submenu overflow handling (flip/fit within viewport)
+        document.querySelectorAll('.context-menu .submenu-parent').forEach(parent => {
+            const adjust = () => this.adjustSubmenuPosition(parent);
+            parent.addEventListener('mouseenter', adjust);
+            parent.addEventListener('focusin', adjust);
+        });
+
+        // Close menus on outside interaction
+        document.addEventListener('pointerdown', (e) => {
             if (!e.target.closest('.context-menu')) {
-                this.hideContextMenu();
-                this.hideSongContextMenu();
-                this.hideLyricsContextMenu();
-                this.hidePlaylistContextMenu();
-                this.hideVideoContextMenu();
-                this.hideMainPanelVideoContextMenu();
+                this.hideAllContextMenus();
             }
-        });
-        
-        document.addEventListener('contextmenu', (e) => {
-            if (!e.target.closest('.song-item') && !e.target.closest('#lyrics') && !e.target.closest('.playlist-item')) {
-                this.hideContextMenu();
-                this.hideSongContextMenu();
-                this.hideLyricsContextMenu();
-                this.hidePlaylistContextMenu();
+        }, { capture: true });
+
+        // Close menus on Escape
+        document.addEventListener('keydown', (e) => {
+            if (!this.activeContextMenu) return;
+
+            const key = e.key;
+
+            if (key === 'Escape') {
+                e.preventDefault();
+                this.hideAllContextMenus();
+                return;
             }
-        });
-        
-        document.onclick = () => {
-            this.hideContextMenu();
-            this.hideSongContextMenu();
-            this.hideLyricsContextMenu();
-            this.hidePlaylistContextMenu();
-        };
+
+            if (!['ArrowDown', 'ArrowUp', 'Home', 'End', 'Enter', ' '].includes(key)) return;
+
+            const menu = this.activeContextMenu;
+            if (!menu.classList.contains('is-open')) return;
+
+            const items = this.getContextMenuItems(menu);
+            if (items.length === 0) return;
+
+            const active = document.activeElement;
+            let index = items.indexOf(active);
+            if (index === -1) index = 0;
+
+            e.preventDefault();
+            e.stopPropagation();
+
+            if (key === 'ArrowDown') {
+                items[(index + 1) % items.length].focus();
+            } else if (key === 'ArrowUp') {
+                items[(index - 1 + items.length) % items.length].focus();
+            } else if (key === 'Home') {
+                items[0].focus();
+            } else if (key === 'End') {
+                items[items.length - 1].focus();
+            } else if (key === 'Enter' || key === ' ') {
+                const el = items[index];
+                if (el && typeof el.click === 'function') el.click();
+            }
+        }, { capture: true });
+
+        // Close menus when window focus/layout changes
+        window.addEventListener('blur', () => this.hideAllContextMenus());
+        window.addEventListener('resize', () => this.hideAllContextMenus());
         
         document.getElementById('addMusic').onclick = async () => {
             const result = await ipcRenderer.invoke('browse-music-folders');
@@ -1122,17 +1513,61 @@ class MusicPlayer {
         if (this.lyricsFileInput) this.lyricsFileInput.onchange = (e) => this.handleFileAdd(e.target.files, 'lyrics');
         
         // Song context menu handlers
-        document.getElementById('addToQueue').onclick = () => this.addToQueue();
-        document.getElementById('enableSelection').onclick = () => this.enableSelectionMode();
+        document.getElementById('addToQueue').onclick = () => {
+            const menu = document.getElementById('songContextMenu');
+            const isMulti = menu?.dataset.mode === 'multi';
+            if (isMulti) {
+                this.addSelectedToQueue();
+            } else {
+                this.addToQueue();
+            }
+        };
+        document.getElementById('enableSelection').onclick = () => {
+            const menu = document.getElementById('songContextMenu');
+            const idx = menu ? Number(menu.dataset.songIndex) : NaN;
+            if (Number.isInteger(idx)) {
+                this.enableSelectionMode(idx, { keepExisting: false, showNotification: true, hideMenu: true });
+            } else {
+                this.enableSelectionMode();
+            }
+        };
         document.getElementById('removeFromPlaylist').onclick = () => this.removeFromPlaylist();
-        document.getElementById('removeLyrics').onclick = () => this.removeLyrics();
-        document.getElementById('viewInFolder').onclick = () => this.viewInFolder();
-        document.getElementById('deleteSong').onclick = () => this.deleteSong();
+        document.getElementById('removeLyrics').onclick = () => {
+            const menu = document.getElementById('songContextMenu');
+            const isMulti = menu?.dataset.mode === 'multi';
+            if (isMulti) {
+                this.removeLyricsForSelection();
+            } else {
+                this.removeLyrics();
+            }
+        };
+        document.getElementById('viewInFolder').onclick = () => {
+            const menu = document.getElementById('songContextMenu');
+            const isMulti = menu?.dataset.mode === 'multi';
+            if (!isMulti) this.viewInFolder();
+        };
+        document.getElementById('deleteSong').onclick = () => {
+            const menu = document.getElementById('songContextMenu');
+            const isMulti = menu?.dataset.mode === 'multi';
+            if (isMulti) {
+                this.deleteSelectedSongs();
+            } else {
+                this.deleteSong();
+            }
+        };
         
 
         
         // Remove video handler is now in HTML
-        document.getElementById('removeVideo').onclick = () => this.removeVideo();
+        document.getElementById('removeVideo').onclick = () => {
+            const menu = document.getElementById('songContextMenu');
+            const isMulti = menu?.dataset.mode === 'multi';
+            if (isMulti) {
+                this.removeVideosForSelection();
+            } else {
+                this.removeVideo();
+            }
+        };
         
         // Lyrics context menu handlers
         document.getElementById('pasteLyrics').onclick = () => this.pasteLyrics();
@@ -1150,6 +1585,251 @@ class MusicPlayer {
         // Main panel video context menu handlers
         document.getElementById('switchBackToMiniPlayer').onclick = () => this.switchBackToMiniPlayer();
         document.getElementById('mainPanelFullScreen').onclick = () => this.playVideoFullScreen();
+    }
+
+    adjustSubmenuPosition(submenuParent) {
+        const submenu = submenuParent?.querySelector('.submenu');
+        if (!submenu) return;
+
+        submenuParent.classList.remove('submenu-left');
+        submenu.style.maxHeight = '';
+        submenu.style.top = '';
+
+        requestAnimationFrame(() => {
+            const margin = 8;
+            const parentRect = submenuParent.getBoundingClientRect();
+            const submenuWidth = submenu.offsetWidth;
+            const rawHeight = submenu.scrollHeight;
+            const availableHeight = Math.max(120, window.innerHeight - margin * 2);
+            const effectiveHeight = Math.min(rawHeight, availableHeight);
+
+            const shouldFlip = parentRect.right + submenuWidth > window.innerWidth - margin;
+            submenuParent.classList.toggle('submenu-left', shouldFlip);
+
+            submenu.style.maxHeight = `${Math.round(availableHeight)}px`;
+
+            let desiredTop = parentRect.top;
+            desiredTop = Math.max(margin, Math.min(desiredTop, window.innerHeight - margin - effectiveHeight));
+            submenu.style.top = `${Math.round(desiredTop - parentRect.top)}px`;
+        });
+    }
+
+    hideAllContextMenus(exceptMenu = null) {
+        const menus = this.contextMenus || Array.from(document.querySelectorAll('.context-menu'));
+        menus.forEach(menu => {
+            if (menu !== exceptMenu) this.closeContextMenu(menu);
+        });
+    }
+
+    getContextMenuItems(menuEl) {
+        if (!menuEl) return [];
+        const items = Array.from(menuEl.querySelectorAll(':scope > .menu-item'));
+        return items.filter(item => {
+            if (item.classList.contains('disabled')) return false;
+            if (item.hidden) return false;
+            if (item.style.display === 'none') return false;
+            return true;
+        });
+    }
+
+    openContextMenu(menuEl, x, y, options = {}) {
+        if (!menuEl) return;
+
+        this.hideAllContextMenus(menuEl);
+        this.preContextMenuFocus = document.activeElement;
+
+        // Ensure the menu can be measured even if legacy code hid it with display: none
+        menuEl.style.display = 'block';
+
+        // Clear any submenu flip class from previous opens
+        menuEl.querySelectorAll('.submenu-parent').forEach(parent => {
+            parent.classList.remove('submenu-left');
+            const submenu = parent.querySelector('.submenu');
+            if (submenu) {
+                submenu.style.maxHeight = '';
+                submenu.style.top = '';
+            }
+        });
+
+        const margin = 8;
+        const menuWidth = menuEl.offsetWidth;
+        const menuHeight = menuEl.offsetHeight;
+        const maxX = Math.max(margin, window.innerWidth - menuWidth - margin);
+        const maxY = Math.max(margin, window.innerHeight - menuHeight - margin);
+        const adjustedX = Math.max(margin, Math.min(x, maxX));
+        const adjustedY = Math.max(margin, Math.min(y, maxY));
+
+        menuEl.style.left = `${adjustedX}px`;
+        menuEl.style.top = `${adjustedY}px`;
+        menuEl.classList.add('is-open');
+        menuEl.setAttribute('aria-hidden', 'false');
+        this.activeContextMenu = menuEl;
+        this.closeAllSubmenus(menuEl);
+
+        if (options.focusFirst) {
+            // Focus first available item for keyboard navigation
+            requestAnimationFrame(() => {
+                const items = this.getContextMenuItems(menuEl);
+                const first = items.find(item => !item.classList.contains('submenu-parent')) || items[0];
+                if (first && typeof first.focus === 'function') first.focus({ preventScroll: true });
+            });
+        }
+    }
+
+    closeContextMenu(menuEl) {
+        if (!menuEl) return;
+        this.closeAllSubmenus(menuEl);
+        menuEl.classList.remove('is-open');
+        menuEl.setAttribute('aria-hidden', 'true');
+        if (this.activeContextMenu === menuEl) {
+            this.activeContextMenu = null;
+            const restore = this.preContextMenuFocus;
+            this.preContextMenuFocus = null;
+            if (restore && restore !== document.body && typeof restore.focus === 'function') {
+                restore.focus({ preventScroll: true });
+            }
+        }
+    }
+
+    setupSubmenuHoverIntent(menuEl) {
+        if (!menuEl) return;
+        const state = {
+            mouseLocs: [],
+            activeParent: null,
+            closeTimer: null
+        };
+        this.submenuStates.set(menuEl, state);
+
+        const track = (e) => {
+            state.mouseLocs.push({ x: e.clientX, y: e.clientY });
+            if (state.mouseLocs.length > 4) state.mouseLocs.shift();
+        };
+
+        menuEl.addEventListener('pointermove', track);
+
+        menuEl.querySelectorAll('.submenu-parent').forEach(parent => {
+            const submenu = parent.querySelector('.submenu');
+            if (!submenu) return;
+
+            const open = () => this.openSubmenu(parent, menuEl);
+            const scheduleClose = () => this.scheduleSubmenuClose(parent, menuEl);
+            const cancelClose = () => this.cancelSubmenuClose(menuEl);
+
+            parent.addEventListener('pointerenter', open);
+            parent.addEventListener('focusin', open);
+            parent.addEventListener('pointerleave', scheduleClose);
+            parent.addEventListener('focusout', scheduleClose);
+
+            submenu.addEventListener('pointerenter', cancelClose);
+            submenu.addEventListener('pointerleave', scheduleClose);
+        });
+    }
+
+    openSubmenu(parent, menuEl) {
+        if (!parent || !menuEl) return;
+        const state = this.submenuStates.get(menuEl);
+        if (!state) return;
+
+        if (state.activeParent && state.activeParent !== parent) {
+            state.activeParent.classList.remove('submenu-open');
+        }
+        state.activeParent = parent;
+        parent.classList.add('submenu-open');
+        this.cancelSubmenuClose(menuEl);
+        this.adjustSubmenuPosition(parent);
+    }
+
+    closeAllSubmenus(menuEl) {
+        if (!menuEl) return;
+        const state = this.submenuStates.get(menuEl);
+        if (state) {
+            this.cancelSubmenuClose(menuEl);
+            state.activeParent = null;
+        }
+        menuEl.querySelectorAll('.submenu-parent.submenu-open').forEach(parent => {
+            parent.classList.remove('submenu-open');
+        });
+    }
+
+    scheduleSubmenuClose(parent, menuEl) {
+        const state = this.submenuStates.get(menuEl);
+        if (!state || !parent) return;
+
+        const delay = this.getSubmenuActivationDelay(menuEl, parent);
+        this.cancelSubmenuClose(menuEl);
+
+        state.closeTimer = setTimeout(() => {
+            parent.classList.remove('submenu-open');
+            if (state.activeParent === parent) state.activeParent = null;
+        }, delay);
+    }
+
+    cancelSubmenuClose(menuEl) {
+        const state = this.submenuStates.get(menuEl);
+        if (state && state.closeTimer) {
+            clearTimeout(state.closeTimer);
+            state.closeTimer = null;
+        }
+    }
+
+    getSubmenuActivationDelay(menuEl, parent) {
+        const state = this.submenuStates.get(menuEl);
+        if (!state || !parent) return 0;
+
+        const submenu = parent.querySelector('.submenu');
+        if (!submenu) return 0;
+
+        const locs = state.mouseLocs;
+        if (locs.length < 2) return 0;
+
+        const curr = locs[locs.length - 1];
+        const prev = locs[locs.length - 2];
+
+        const parentRect = parent.getBoundingClientRect();
+        const submenuRect = submenu.getBoundingClientRect();
+        const tolerance = 10;
+
+        // If cursor is inside submenu or the bridge corridor, keep open without delay.
+        if (this.pointInRect(curr, submenuRect) || this.pointInCorridor(curr, parentRect, submenuRect, tolerance)) {
+            return 250;
+        }
+
+        const submenuOnRight = !parent.classList.contains('submenu-left');
+        const upper = {
+            x: submenuOnRight ? submenuRect.left : submenuRect.right,
+            y: submenuRect.top - tolerance
+        };
+        const lower = {
+            x: submenuOnRight ? submenuRect.left : submenuRect.right,
+            y: submenuRect.bottom + tolerance
+        };
+
+        const movingToward = this.isMovingTowardSubmenu(prev, curr, upper, lower);
+        return movingToward ? 250 : 80;
+    }
+
+    pointInRect(point, rect) {
+        return point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom;
+    }
+
+    pointInCorridor(point, parentRect, submenuRect, pad) {
+        const left = Math.min(parentRect.right, submenuRect.left) - pad;
+        const right = Math.max(parentRect.right, submenuRect.left) + pad;
+        const top = Math.min(parentRect.top, submenuRect.top) - pad;
+        const bottom = Math.max(parentRect.bottom, submenuRect.bottom) + pad;
+        return point.x >= left && point.x <= right && point.y >= top && point.y <= bottom;
+    }
+
+    isMovingTowardSubmenu(prev, curr, upper, lower) {
+        const slope = (a, b) => {
+            if (b.x === a.x) return b.y > a.y ? Infinity : -Infinity;
+            return (b.y - a.y) / (b.x - a.x);
+        };
+        const prevUpper = slope(prev, upper);
+        const prevLower = slope(prev, lower);
+        const currUpper = slope(curr, upper);
+        const currLower = slope(curr, lower);
+        return currUpper < prevUpper && currLower > prevLower;
     }
     
     setupDragDrop() {
@@ -1240,21 +1920,15 @@ class MusicPlayer {
     }
     
     showContextMenu(x, y) {
-        this.contextMenu.style.display = 'block';
-        
-        const menuRect = this.contextMenu.getBoundingClientRect();
-        const adjustedX = Math.min(x, window.innerWidth - menuRect.width - 10);
-        const adjustedY = Math.min(y, window.innerHeight - menuRect.height - 10);
-        
-        this.contextMenu.style.left = `${adjustedX}px`;
-        this.contextMenu.style.top = `${adjustedY}px`;
+        this.openContextMenu(this.contextMenu, x, y);
     }
     
     hideContextMenu() {
-        this.contextMenu.style.display = 'none';
+        this.closeContextMenu(this.contextMenu);
     }
     
-    showSongContextMenu(x, y, songIndex) {
+    showSongContextMenu(x, y, songIndex, options = {}) {
+        const { forceMulti = false } = options;
         if (songIndex < 0 || songIndex >= this.songs.length) {
             console.error('Invalid song index for context menu:', songIndex);
             return;
@@ -1262,9 +1936,18 @@ class MusicPlayer {
         this.selectedSongIndex = songIndex;
         const song = this.songs[songIndex];
         const songContextMenu = document.getElementById('songContextMenu');
+        if (songContextMenu) songContextMenu.dataset.songIndex = String(songIndex);
         const addToQueueBtn = document.getElementById('addToQueue');
         const removeLyricsBtn = document.getElementById('removeLyrics');
+        const removeVideoBtn = document.getElementById('removeVideo');
+        const viewInFolderBtn = document.getElementById('viewInFolder');
+        const enableSelectionBtn = document.getElementById('enableSelection');
+        const removeFromPlaylistBtn = document.getElementById('removeFromPlaylist');
+        const deleteSongBtn = document.getElementById('deleteSong');
         
+        const selectionActive = forceMulti || (this.selectionMode && this.selectedSongs.size > 0);
+        if (songContextMenu) songContextMenu.dataset.mode = selectionActive ? 'multi' : 'single';
+
         // Populate playlist submenu
         const playlistSubmenu = document.getElementById('playlistSubmenu');
         const playlistNames = Object.keys(this.playlists);
@@ -1273,90 +1956,114 @@ class MusicPlayer {
         if (playlistNames.length === 0) {
             const item = document.createElement('div');
             item.className = 'menu-item disabled';
-            item.textContent = 'No playlists available';
+            item.setAttribute('role', 'menuitem');
+            item.setAttribute('aria-disabled', 'true');
+            item.tabIndex = -1;
+            const label = document.createElement('span');
+            label.className = 'menu-label';
+            label.textContent = 'No playlists available';
+            item.appendChild(label);
             playlistSubmenu.appendChild(item);
         } else {
             playlistNames.forEach(name => {
                 const item = document.createElement('div');
                 item.className = 'menu-item';
-                item.textContent = name;
+                item.setAttribute('role', 'menuitem');
+                item.tabIndex = -1;
+                const label = document.createElement('span');
+                label.className = 'menu-label';
+                label.textContent = name;
+                item.appendChild(label);
                 item.onclick = () => {
-                    this.addToPlaylist(name);
+                    if (selectionActive) {
+                        this.addSelectedToPlaylist(name);
+                    } else {
+                        this.addToPlaylist(name);
+                    }
                     this.hideSongContextMenu();
                 };
                 playlistSubmenu.appendChild(item);
             });
         }
-        
-        // Hide Add to Queue for currently playing song
-        if (songIndex === this.currentSongIndex) {
-            addToQueueBtn.style.display = 'none';
+
+        if (selectionActive) {
+            const indices = this.getSelectedSongIndices();
+            const allHaveLyrics = indices.length > 0 && indices.every(idx => {
+                const s = this.songs[idx];
+                return !!s && !!s.hasLyrics && !s.isVideo;
+            });
+            const allHaveVideo = indices.length > 0 && indices.every(idx => {
+                const s = this.songs[idx];
+                return !!s && !!s.attachedVideo;
+            });
+
+            if (addToQueueBtn) addToQueueBtn.style.display = '';
+            if (enableSelectionBtn) enableSelectionBtn.style.display = 'none';
+            if (viewInFolderBtn) viewInFolderBtn.style.display = 'none';
+            if (removeFromPlaylistBtn) removeFromPlaylistBtn.style.display = 'none';
+
+            if (removeLyricsBtn) {
+                removeLyricsBtn.style.display = '';
+                removeLyricsBtn.classList.toggle('disabled', !allHaveLyrics);
+            }
+            if (removeVideoBtn) {
+                removeVideoBtn.style.display = '';
+                removeVideoBtn.classList.toggle('disabled', !allHaveVideo);
+            }
+            if (deleteSongBtn) deleteSongBtn.style.display = '';
         } else {
-            addToQueueBtn.style.display = 'block';
+            // Hide Add to Queue for currently playing song
+            if (songIndex === this.currentSongIndex) {
+                addToQueueBtn.style.display = 'none';
+            } else {
+                addToQueueBtn.style.display = '';
+            }
+
+            if (enableSelectionBtn) enableSelectionBtn.style.display = '';
+            if (viewInFolderBtn) viewInFolderBtn.style.display = '';
+
+            // Update menu items based on context
+            if (removeFromPlaylistBtn) {
+                removeFromPlaylistBtn.style.display = this.currentPlaylist ? '' : 'none';
+            }
+            
+            if (removeLyricsBtn) {
+                removeLyricsBtn.style.display = song.hasLyrics ? '' : 'none';
+                removeLyricsBtn.classList.remove('disabled');
+            }
+            
+            if (removeVideoBtn) {
+                if (song.attachedVideo) {
+                    removeVideoBtn.classList.remove('disabled');
+                } else {
+                    removeVideoBtn.classList.add('disabled');
+                }
+            }
         }
         
-        // Update menu items based on context
-        const removeFromPlaylistBtn = document.getElementById('removeFromPlaylist');
-        if (this.currentPlaylist) {
-            removeFromPlaylistBtn.style.display = 'block';
-        } else {
-            removeFromPlaylistBtn.style.display = 'none';
-        }
-        
-        if (song.hasLyrics) {
-            removeLyricsBtn.style.display = 'block';
-        } else {
-            removeLyricsBtn.style.display = 'none';
-        }
-        
-        // Update remove video button based on video availability
-        const removeVideoBtn = document.getElementById('removeVideo');
-        if (song.attachedVideo) {
-            removeVideoBtn.classList.remove('disabled');
-        } else {
-            removeVideoBtn.classList.add('disabled');
-        }
-        
-        songContextMenu.style.display = 'block';
-        
-        const menuRect = songContextMenu.getBoundingClientRect();
-        const adjustedX = Math.min(x, window.innerWidth - menuRect.width - 10);
-        const adjustedY = Math.min(y, window.innerHeight - menuRect.height - 10);
-        
-        songContextMenu.style.left = `${adjustedX}px`;
-        songContextMenu.style.top = `${adjustedY}px`;
+        this.openContextMenu(songContextMenu, x, y);
     }
     
     hideSongContextMenu() {
-        document.getElementById('songContextMenu').style.display = 'none';
+        this.closeContextMenu(document.getElementById('songContextMenu'));
     }
     
     addToQueue() {
         if (this.currentSongIndex >= 0 && this.isPlaying) {
+            this.setPlaybackContextFromBrowseContext();
             this.queue.push(this.selectedSongIndex);
+            this.renderQueuePanelIfVisible();
         }
         this.hideSongContextMenu();
     }
     
     showLyricsContextMenu(x, y) {
         const lyricsContextMenu = document.getElementById('lyricsContextMenu');
-        lyricsContextMenu.style.display = 'block';
-        
-        // Get menu dimensions
-        const menuRect = lyricsContextMenu.getBoundingClientRect();
-        const windowWidth = window.innerWidth;
-        const windowHeight = window.innerHeight;
-        
-        // Adjust position to keep menu within window bounds
-        const adjustedX = Math.min(x, windowWidth - menuRect.width - 10);
-        const adjustedY = Math.min(y, windowHeight - menuRect.height - 10);
-        
-        lyricsContextMenu.style.left = `${adjustedX}px`;
-        lyricsContextMenu.style.top = `${adjustedY}px`;
+        this.openContextMenu(lyricsContextMenu, x, y);
     }
     
     hideLyricsContextMenu() {
-        document.getElementById('lyricsContextMenu').style.display = 'none';
+        this.closeContextMenu(document.getElementById('lyricsContextMenu'));
     }
     
     async pasteLyrics() {
@@ -1390,6 +2097,7 @@ class MusicPlayer {
                 
                 // Update the songs array to persist the change
                 this.songs[this.currentSongIndex] = song;
+                this.updateMediaAvailabilityButtons(song);
                 
                 this.showNotification('Lyrics pasted successfully', 'success');
             } else {
@@ -1446,6 +2154,7 @@ class MusicPlayer {
                 
                 // Update the song item badge without full reload
                 this.updateSongBadge(this.selectedSongIndex, false);
+                this.updateMediaAvailabilityButtons(song);
                 
                 // Clear lyrics if it's the currently playing song
                 if (this.selectedSongIndex === this.currentSongIndex) {
@@ -1474,6 +2183,72 @@ class MusicPlayer {
         }).catch(() => {
             this.showNotification('Error removing lyrics', 'error');
         });
+        this.hideSongContextMenu();
+    }
+
+    async removeLyricsForSelection() {
+        const indices = this.getSelectedSongIndices();
+        if (indices.length === 0) {
+            this.showNotification('No songs selected', 'info');
+            return;
+        }
+
+        const eligible = indices.filter(idx => {
+            const s = this.songs[idx];
+            return !!s && !!s.hasLyrics && !s.isVideo;
+        });
+
+        if (eligible.length !== indices.length) {
+            this.showNotification('Selected songs must all have lyrics to remove', 'error');
+            return;
+        }
+
+        this.showNotification('Removing lyrics...', 'info');
+
+        const results = await Promise.allSettled(
+            eligible.map(idx => ipcRenderer.invoke('remove-lyrics', this.songs[idx].baseName))
+        );
+
+        let successCount = 0;
+        results.forEach((res, i) => {
+            if (res.status === 'fulfilled' && res.value) {
+                const idx = eligible[i];
+                const song = this.songs[idx];
+                if (!song) return;
+                song.hasLyrics = false;
+                song.lyricsFile = null;
+                this.updateSongBadge(idx, false);
+                if (idx === this.currentSongIndex) {
+                    this.lyrics = [];
+                    this.lyricsDiv.innerHTML = `
+                        <div class="no-lyrics-container">
+                            <p class="no-lyrics">No lyrics available</p>
+                            <div class="lyrics-instructions">
+                                <ul class="instruction-list">
+                                    <li>Drop .lrc file here</li>
+                                    <li>Right-click and paste synced lyrics</li>
+                                    <li><a href="#" onclick="player.searchMusicOnline()" style="color: #4a9eff; text-decoration: none;">Search Music Online</a></li>
+                                </ul>
+                                <p class="format-hint">Synced lyrics format: [00:12.34]Lyric text here</p>
+                            </div>
+                        </div>
+                    `;
+                    this.setupLyricsDragDrop();
+                    this.setupLyricsKeyboardShortcut();
+                    this.updateMediaAvailabilityButtons(song);
+                }
+                successCount++;
+            }
+        });
+
+        if (successCount > 0) {
+            this.showNotification(`Lyrics removed from ${successCount} song${successCount === 1 ? '' : 's'}`, 'success');
+        }
+
+        if (successCount !== eligible.length) {
+            this.showNotification('Some lyrics could not be removed', 'error');
+        }
+
         this.hideSongContextMenu();
     }
     
@@ -1540,6 +2315,66 @@ class MusicPlayer {
                 this.showNotification('Error removing video', 'error');
             });
         }
+        this.hideSongContextMenu();
+    }
+
+    async removeVideosForSelection() {
+        const indices = this.getSelectedSongIndices();
+        if (indices.length === 0) {
+            this.showNotification('No songs selected', 'info');
+            return;
+        }
+
+        const eligible = indices.filter(idx => {
+            const s = this.songs[idx];
+            return !!s && !!s.attachedVideo;
+        });
+
+        if (eligible.length !== indices.length) {
+            this.showNotification('Selected songs must all have attached videos to remove', 'error');
+            return;
+        }
+
+        const count = eligible.length;
+        const ok = await this.showConfirmDialog({
+            title: 'Remove attached videos?',
+            message: `Remove attached video from ${count} song${count === 1 ? '' : 's'}?`,
+            confirmText: 'Remove',
+            kind: 'danger'
+        });
+        if (!ok) return;
+
+        this.showNotification('Removing video...', 'info');
+
+        const results = await Promise.allSettled(
+            eligible.map(idx => ipcRenderer.invoke('remove-attached-video', this.songs[idx].baseName))
+        );
+
+        let successCount = 0;
+        results.forEach((res, i) => {
+            if (res.status === 'fulfilled' && res.value) {
+                const idx = eligible[i];
+                const song = this.songs[idx];
+                if (!song) return;
+                song.attachedVideo = null;
+                this.updateSongBadge(idx, song.hasLyrics);
+                if (idx === this.currentSongIndex) {
+                    this.videoElement.src = '';
+                    if (this.isVideoMode) {
+                        this.switchToMusic();
+                    }
+                }
+                successCount++;
+            }
+        });
+
+        if (successCount > 0) {
+            this.showNotification(`Video removed from ${successCount} song${successCount === 1 ? '' : 's'}`, 'success');
+        }
+        if (successCount !== eligible.length) {
+            this.showNotification('Some videos could not be removed', 'error');
+        }
+
         this.hideSongContextMenu();
     }
     
@@ -1615,6 +2450,7 @@ class MusicPlayer {
     
     setupVideo() {
         this.videoBtn.onclick = () => this.toggleVideoMode();
+        if (this.visualizerBtn) this.visualizerBtn.onclick = () => this.toggleVisualizerView();
         this.lyricsToggleBtn.onclick = () => this.toggleLyrics();
     }
     
@@ -1650,11 +2486,8 @@ class MusicPlayer {
         
         this.loadFontSettings();
         
-        // Show font button if lyrics are already visible
-        const lyricsVisible = this.lyricsToggleBtn.classList.contains('active') && this.lyricsDiv.style.display !== 'none';
-        if (lyricsVisible) {
-            this.lyricsFontBtn.style.display = 'flex';
-        }
+        // Keep it visible; disable/enable is handled by updateFontButtonState().
+        this.lyricsFontBtn.style.display = 'flex';
         
         // Use requestAnimationFrame to prevent layout thrashing
         requestAnimationFrame(() => {
@@ -1718,27 +2551,304 @@ class MusicPlayer {
         }
     }
     
+    applyLyricsVisibilityPreference() {
+        if (!this.lyricsDiv || !this.lyricsToggleBtn) return;
+        const visible = this.settings.lyricsVisible !== false;
+
+        if (visible) {
+            this.lyricsDiv.style.display = 'block';
+            if (this.queuePanel) this.queuePanel.style.display = 'none';
+            this.lyricsToggleBtn.classList.add('active');
+        } else {
+            this.lyricsDiv.style.display = 'none';
+            if (this.queuePanel) this.queuePanel.style.display = 'flex';
+            this.lyricsToggleBtn.classList.remove('active');
+            if (this.lyricsFontControls) this.lyricsFontControls.style.display = 'none';
+            if (this.lyricsFontBtn) this.lyricsFontBtn.classList.remove('active');
+            this.renderQueuePanelIfVisible();
+        }
+
+        this.updateFontButtonState();
+    }
+
     toggleLyrics() {
         const isHidden = this.lyricsDiv.style.display === 'none';
         
         if (isHidden) {
             this.lyricsDiv.style.display = 'block';
+            if (this.queuePanel) this.queuePanel.style.display = 'none';
             this.lyricsToggleBtn.classList.add('active');
             this.showNotification('Lyrics shown', 'info');
         } else {
             this.lyricsDiv.style.display = 'none';
+            if (this.queuePanel) this.queuePanel.style.display = 'flex';
             this.lyricsToggleBtn.classList.remove('active');
             this.lyricsFontControls.style.display = 'none';
             this.lyricsFontBtn.classList.remove('active');
             this.showNotification('Lyrics hidden', 'info');
+            this.renderQueuePanelIfVisible();
         }
+        this.settings.lyricsVisible = this.lyricsDiv.style.display !== 'none';
+        this.saveSettings();
         this.updateFontButtonState();
+    }
+
+    isQueuePanelVisible() {
+        return !!this.queuePanel && this.queuePanel.style.display !== 'none';
+    }
+
+    renderQueuePanelIfVisible() {
+        if (!this.isQueuePanelVisible()) return;
+        this.renderQueuePanel();
+    }
+
+    getQueueCoverUrl(song) {
+        if (!song || !song.picture) return null;
+        const key = song.path || song.name || song.baseName;
+        if (!key) return null;
+
+        const cached = this.queueCoverUrlCache.get(key);
+        if (cached) return cached;
+
+        try {
+            const url = URL.createObjectURL(new Blob([song.picture]));
+            this.queueCoverUrlCache.set(key, url);
+
+            const maxEntries = 120;
+            if (this.queueCoverUrlCache.size > maxEntries) {
+                const firstKey = this.queueCoverUrlCache.keys().next().value;
+                const firstUrl = this.queueCoverUrlCache.get(firstKey);
+                if (firstUrl) URL.revokeObjectURL(firstUrl);
+                this.queueCoverUrlCache.delete(firstKey);
+            }
+
+            return url;
+        } catch {
+            return null;
+        }
+    }
+
+    getQueuePreviewIndices(limit = 25) {
+        const maxItems = Math.max(1, Math.min(200, Number(limit) || 25));
+        const indices = [];
+
+        if (this.currentSongIndex < 0 || this.currentSongIndex >= this.songs.length) return indices;
+        indices.push(this.currentSongIndex);
+
+        if (this.repeatMode === 'one') return indices;
+
+        const queue = Array.isArray(this.queue) ? this.queue : [];
+        let simulatedCurrentIndex = this.currentSongIndex;
+        for (let i = queue.length - 1; i >= 0; i--) {
+            const n = Number(queue[i]);
+            if (Number.isInteger(n) && n >= 0 && n < this.songs.length) {
+                simulatedCurrentIndex = n;
+                break;
+            }
+        }
+
+        for (let i = 0; i < queue.length && indices.length < maxItems; i++) {
+            const n = Number(queue[i]);
+            if (!Number.isInteger(n) || n < 0 || n >= this.songs.length) continue;
+            indices.push(n);
+        }
+
+        if (indices.length >= maxItems) return indices;
+
+        if (this.shuffleMode) {
+            if (Array.isArray(this.shuffleQueue) && this.shuffleQueue.length > 0) {
+                for (let i = 0; i < this.shuffleQueue.length && indices.length < maxItems; i++) {
+                    const n = Number(this.shuffleQueue[i]);
+                    if (!Number.isInteger(n) || n < 0 || n >= this.songs.length) continue;
+                    indices.push(n);
+                }
+            }
+            return indices;
+        }
+
+        const contextSongs = this.getContextSongs() || [];
+        if (contextSongs.length === 0) return indices;
+
+        const simulatedSong = this.songs[simulatedCurrentIndex];
+        let startPos = contextSongs.indexOf(simulatedSong);
+        if (startPos === -1) startPos = -1;
+
+        const maxSteps =
+            this.repeatMode === 'all' && startPos !== -1 ? Math.max(0, contextSongs.length - 1) : contextSongs.length;
+        for (let step = 1; step <= maxSteps && indices.length < maxItems; step++) {
+            let nextPos = startPos + step;
+            if (nextPos >= contextSongs.length) {
+                if (this.repeatMode !== 'all') break;
+                nextPos = nextPos % contextSongs.length;
+            }
+
+            const nextSong = contextSongs[nextPos];
+            const nextIndex = this.songs.indexOf(nextSong);
+            if (nextIndex >= 0) indices.push(nextIndex);
+        }
+
+        return indices;
+    }
+
+    renderQueuePanel() {
+        if (!this.queueList || !this.queuePanel) return;
+
+        const maxItems = 25;
+        const indices = this.getQueuePreviewIndices(maxItems);
+
+        if (this.queueMeta) {
+            const parts = [];
+            if (this.shuffleMode) parts.push('Shuffle');
+            if (this.repeatMode === 'all') parts.push('Repeat');
+            if (this.repeatMode === 'one') parts.push('Repeat 1');
+            if (this.repeatMode !== 'one' && this.queue && this.queue.length) parts.push(`Queued ${this.queue.length}`);
+
+            const shownUpcoming = Math.max(0, indices.length - 1);
+            if (this.currentSongIndex >= 0 && this.repeatMode !== 'one') {
+                const suffix = shownUpcoming >= maxItems - 1 ? '+' : '';
+                parts.push(`Up next ${shownUpcoming}${suffix}`);
+            }
+
+            this.queueMeta.textContent = parts.join(' • ');
+        }
+
+        if (indices.length === 0) {
+            this.queueList.innerHTML = `<div class="queue-empty">No song selected</div>`;
+            return;
+        }
+
+        this.queueList.innerHTML = '';
+        const fragment = document.createDocumentFragment();
+
+        for (let i = 0; i < indices.length; i++) {
+            const songIndex = indices[i];
+            const song = this.songs[songIndex];
+            if (!song) continue;
+
+            const item = document.createElement('div');
+            item.className = 'queue-item';
+            if (songIndex === this.currentSongIndex) item.classList.add('active');
+            item.dataset.songIndex = String(songIndex);
+
+            const cover = document.createElement('div');
+            cover.className = 'queue-cover';
+
+            const coverUrl = this.getQueueCoverUrl(song);
+            if (coverUrl) {
+                const img = document.createElement('img');
+                img.src = coverUrl;
+                img.alt = 'Cover';
+                cover.appendChild(img);
+            } else {
+                const placeholder = document.createElement('div');
+                placeholder.className = 'cover-placeholder';
+                placeholder.textContent = '🎵';
+                cover.appendChild(placeholder);
+            }
+
+            const info = document.createElement('div');
+            info.className = 'queue-info';
+            info.innerHTML = `
+                <div class="queue-title">${this.escapeHtml(song.title)}</div>
+                <div class="queue-artist">${this.escapeHtml(song.artist)}</div>
+            `;
+
+            item.appendChild(cover);
+            item.appendChild(info);
+
+            if (i === 0) {
+                const badge = document.createElement('div');
+                badge.className = 'queue-badge';
+                badge.textContent = 'Now';
+                item.appendChild(badge);
+            } else if (i === 1) {
+                const badge = document.createElement('div');
+                badge.className = 'queue-badge';
+                badge.textContent = 'Next';
+                item.appendChild(badge);
+            }
+
+            item.onclick = () => this.handleQueuePreviewClick(i, indices);
+
+            fragment.appendChild(item);
+        }
+
+        this.queueList.appendChild(fragment);
+    }
+
+    handleQueuePreviewClick(position, indices) {
+        if (!Array.isArray(indices)) return;
+        const pos = Number(position);
+        if (!Number.isInteger(pos) || pos < 0 || pos >= indices.length) return;
+
+        const targetIndex = Number(indices[pos]);
+        if (!Number.isInteger(targetIndex) || targetIndex < 0 || targetIndex >= this.songs.length) return;
+
+        // "Skip ahead" behavior: everything above the clicked song in the queue preview is skipped.
+        // The preview order is: [Now playing] + [manual queue] + [shuffle queue OR context order].
+        if (pos > 0 && this.repeatMode !== 'one') {
+            const queueLen = Array.isArray(this.queue) ? this.queue.length : 0;
+
+            if (queueLen > 0) {
+                if (pos <= queueLen) {
+                    // Clicked within manual queue: drop items up to and including the clicked one.
+                    this.queue.splice(0, pos);
+                } else {
+                    // Clicked beyond manual queue: skip everything queued manually.
+                    this.queue.length = 0;
+                }
+            }
+
+            if (this.shuffleMode && Array.isArray(this.shuffleQueue)) {
+                // If the click is in the shuffle-preview portion, skip those earlier shuffle items too.
+                const shuffleStartPos = 1 + queueLen;
+                if (pos >= shuffleStartPos) {
+                    const shufflePos = pos - shuffleStartPos;
+                    if (shufflePos >= 0) {
+                        this.shuffleQueue.splice(0, Math.min(this.shuffleQueue.length, shufflePos + 1));
+                    }
+                }
+            }
+        }
+
+        this.selectSong(targetIndex);
     }
     
     updateFontButtonState() {
         const lyricsVisible = this.lyricsToggleBtn.classList.contains('active') && this.lyricsDiv.style.display !== 'none';
-        this.lyricsFontBtn.disabled = !lyricsVisible;
-        this.lyricsFontBtn.style.opacity = lyricsVisible ? '1' : '0.4';
+        const currentSong = this.currentSongIndex >= 0 ? this.songs[this.currentSongIndex] : null;
+        const hasLyrics = !!currentSong && !!currentSong.hasLyrics && !currentSong.isVideo;
+        const enabled = lyricsVisible && hasLyrics;
+        this.lyricsFontBtn.disabled = !enabled;
+        this.lyricsFontBtn.style.opacity = enabled ? '1' : '0.4';
+    }
+
+    updateMediaAvailabilityButtons(song) {
+        const currentSong = song || (this.currentSongIndex >= 0 ? this.songs[this.currentSongIndex] : null);
+        const hasLyrics = !!currentSong && !!currentSong.hasLyrics && !currentSong.isVideo;
+        const hasVideo = !!currentSong && (!!currentSong.isVideo || !!currentSong.attachedVideo || !!currentSong.youtubeVideo);
+
+        if (this.videoBtn) {
+            this.videoBtn.disabled = !hasVideo;
+            this.videoBtn.style.opacity = hasVideo ? '1' : '0.4';
+        }
+
+        if (this.floatLyricsBtn) {
+            if (!hasLyrics) {
+                // Avoid trapping the user with an open floating window and a disabled close button.
+                ipcRenderer.invoke('is-floating-window-open')
+                    .then(isOpen => {
+                        if (isOpen) ipcRenderer.send('close-floating-lyrics');
+                    })
+                    .catch(() => {});
+                this.floatLyricsBtn.classList.remove('active');
+            }
+            this.floatLyricsBtn.disabled = !hasLyrics;
+            this.floatLyricsBtn.style.opacity = hasLyrics ? '1' : '0.4';
+        }
+
+        // Lyrics toggle stays available always; only the font/settings depend on lyrics availability + visibility.
+        if (this.lyricsFontBtn) this.updateFontButtonState();
     }
     
     toggleFontPanel() {
@@ -1839,6 +2949,10 @@ class MusicPlayer {
     }
     
     toggleVideoMode() {
+        if (this.videoBtn?.disabled) {
+            this.showNotification('No video available for this song', 'info');
+            return;
+        }
         if (this.currentSongIndex < 0) {
             this.showNotification('No song selected', 'error');
             return;
@@ -1850,7 +2964,7 @@ class MusicPlayer {
             return;
         }
         
-        if (currentSong.isVideo || currentSong.attachedVideo) {
+        if (currentSong.isVideo || currentSong.attachedVideo || currentSong.youtubeVideo) {
             if (this.isVideoMode) {
                 // Switch back to music
                 this.switchToMusic();
@@ -1865,11 +2979,13 @@ class MusicPlayer {
     
     switchToVideo() {
         const currentSong = this.songs[this.currentSongIndex];
+        if (this.isVisualizerViewActive) this.disableVisualizerView(true);
         const wasPlaying = this.isPlaying;
         const currentTime = this.audio.currentTime;
         
         // Stop music completely
         this.audio.pause();
+        this.stopVisualizer();
         this.isPlaying = false;
         this.playPauseImg.src = 'icons/play.png';
         
@@ -1905,6 +3021,7 @@ class MusicPlayer {
         const currentSong = this.songs[this.currentSongIndex];
         const wasPlaying = this.isPlaying;
         const currentTime = this.videoElement.currentTime;
+        this.stopVisualizer();
         
         // Move video back to default if in main panel
         if (this.videoInMainPanel) {
@@ -2010,7 +3127,8 @@ class MusicPlayer {
             };
         });
         
-        document.getElementById('viewStorageFolderBtn').onclick = () => this.viewStorageFolder();
+        const viewStorageFolderBtn = document.getElementById('viewStorageFolderBtn');
+        if (viewStorageFolderBtn) viewStorageFolderBtn.onclick = () => this.viewStorageFolder();
         document.getElementById('addMusicFilesBtn').onclick = () => this.addMusicFolders();
         document.getElementById('downloadMusicBtn').onclick = () => {
             this.showNotification('Download feature removed', 'info');
@@ -2135,7 +3253,8 @@ class MusicPlayer {
         // Update the displayed title immediately
         document.getElementById('playlistTitle').textContent = newName;
         
-        this.showPlaylistDetails(newName, (Array.isArray(playlistData) ? playlistData : playlistData.songs).length);
+        const playlistSongs = this.getPlaylistSongs(newName);
+        this.showPlaylistDetails(newName, playlistSongs.length, playlistSongs);
         this.showNotification(`Playlist renamed to "${newName}"`, 'success');
     }
     
@@ -2272,26 +3391,19 @@ class MusicPlayer {
         this.playlists[name] = {
             songs: [],
             pinned: false,
-            coverImage: 'icons/default-playlist.png'
+            coverImage: 'icons/default-playlist.png',
+            createdAt: Date.now()
         };
         
         this.playlistOrder.push(name);
         this.savePlaylists();
         this.displayPlaylists();
-        
-        // Auto-trigger rename for the newly created playlist
-        setTimeout(() => {
-            this.loadPlaylist(name);
-            setTimeout(() => {
-                const editIcon = document.getElementById('playlistEditIcon');
-                if (editIcon) {
-                    editIcon.click();
-                }
-            }, 100);
-        }, 50);
+
+        this.loadPlaylist(name);
+        this.showPlaylistModal(name, { fallbackName: name });
     }
     
-    showPlaylistModal(editingName = null) {
+    showPlaylistModal(editingName = null, options = {}) {
         const isEditing = !!editingName;
         const playlistData = isEditing ? this.playlists[editingName] : null;
         
@@ -2299,6 +3411,8 @@ class MusicPlayer {
         modal.className = 'playlist-modal-overlay';
         modal.dataset.editing = isEditing;
         if (isEditing) modal.dataset.originalName = editingName;
+        const fallbackName = options.fallbackName || editingName || '';
+        if (fallbackName) modal.dataset.fallbackName = fallbackName;
         
         modal.innerHTML = `
             <div class="playlist-modal">
@@ -2381,9 +3495,11 @@ class MusicPlayer {
     }
     
     createPlaylistFromModal(modal) {
-        const name = document.getElementById('modalPlaylistName').value.trim();
+        const inputValue = document.getElementById('modalPlaylistName').value.trim();
         const isEditing = modal.dataset.editing;
         const originalName = modal.dataset.originalName;
+        const fallbackName = modal.dataset.fallbackName || originalName || '';
+        const name = inputValue || fallbackName;
         
         if (!name) {
             this.showNotification('Playlist name cannot be empty', 'error');
@@ -2416,7 +3532,8 @@ class MusicPlayer {
             this.playlists[name] = {
                 songs: [],
                 pinned: false,
-                coverImage: coverPath || 'icons/default-playlist.png'
+                coverImage: coverPath || 'icons/default-playlist.png',
+                createdAt: Date.now()
             };
             this.playlistOrder.push(name);
             this.showNotification(`Playlist "${name}" created`, 'success');
@@ -2426,7 +3543,8 @@ class MusicPlayer {
         this.displayPlaylists();
         // Update playlist details if currently viewing this playlist
         if (this.currentPlaylist === (isEditing ? originalName : name)) {
-            this.showPlaylistDetails(isEditing ? name : name, (isEditing ? this.playlists[name] : this.playlists[name]).songs.length);
+            const playlistSongs = this.getPlaylistSongs(isEditing ? name : name);
+            this.showPlaylistDetails(isEditing ? name : name, playlistSongs.length, playlistSongs);
         }
         modal.remove();
     }
@@ -2468,6 +3586,7 @@ class MusicPlayer {
     }
     
     loadPlaylist(name) {
+        if (this.isVisualizerViewActive) this.disableVisualizerView(true);
         if (!this.songs || this.songs.length === 0) {
             setTimeout(() => this.loadPlaylist(name), 100);
             return;
@@ -2489,7 +3608,7 @@ class MusicPlayer {
         }).filter(song => song !== undefined); // Remove any songs that no longer exist
         
         // Update UI immediately without loading states
-        this.showPlaylistDetails(name, playlistSongs.length);
+        this.showPlaylistDetails(name, playlistSongs.length, playlistSongs);
         this.displayPlaylists();
         
         if (playlistSongs.length === 0) {
@@ -2506,6 +3625,8 @@ class MusicPlayer {
             this.filteredSongs = playlistSongs;
             this.displayFilteredSongs();
         }
+
+        this.renderQueuePanelIfVisible();
     }
     
     showAllSongs() {
@@ -2519,18 +3640,33 @@ class MusicPlayer {
         this.showNotification('Showing all songs', 'info');
     }
     
-    showPlaylistDetails(name, songCount) {
+    showPlaylistDetails(name, songCount, playlistSongs = null) {
         const panel = document.getElementById('playlistDetailsPanel');
         const title = document.getElementById('playlistTitle');
         const stats = document.getElementById('playlistStats');
         const description = document.getElementById('playlistDescription');
         const cover = document.getElementById('playlistCover');
+        const metaLine = document.getElementById('playlistMetaLine');
         const playlistData = this.playlists[name];
+        const songs = Array.isArray(playlistSongs) ? playlistSongs : this.getPlaylistSongs(name);
+        const totalDuration = songs.reduce((sum, song) => sum + (Number(song?.duration) || 0), 0);
+        const durationText = this.formatPlaylistDuration(totalDuration);
+        const createdAt = Array.isArray(playlistData) ? null : playlistData?.createdAt;
+        const createdText = createdAt ? new Date(createdAt).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : null;
         
         // Update text content immediately
         title.textContent = name;
         stats.textContent = `${songCount} song${songCount !== 1 ? 's' : ''}`;
-        description.textContent = songCount === 0 ? 'Empty playlist' : 'Custom playlist';
+        description.textContent = songCount === 0 ? 'Empty playlist' : 'Curated by you';
+        if (metaLine) {
+            const metaItems = [
+                durationText,
+                'Custom playlist',
+                createdText ? `Created ${createdText}` : null
+            ].filter(Boolean);
+            metaLine.innerHTML = metaItems.map(item => `<span class="playlist-meta-chip">${item}</span>`).join('');
+            metaLine.style.display = metaItems.length > 0 ? 'flex' : 'none';
+        }
         panel.style.display = 'block';
         
         // Load images asynchronously to prevent blocking
@@ -2565,6 +3701,21 @@ class MusicPlayer {
         cover.onclick = () => this.selectPlaylistCover(name);
         this.setupPlaylistNameEdit(name);
         this.setupPlaylistBgEdit(name);
+    }
+
+    formatPlaylistDuration(totalSeconds) {
+        if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) return null;
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = Math.floor(totalSeconds % 60);
+
+        if (hours > 0) {
+            return `${hours}h ${minutes}m`;
+        }
+        if (minutes > 0) {
+            return `${minutes}m ${seconds}s`;
+        }
+        return `${seconds}s`;
     }
     
     async selectPlaylistCover(playlistName) {
@@ -2629,6 +3780,8 @@ class MusicPlayer {
     selectCategory(category, displayText) {
         // Close dropdown and update UI immediately
         document.getElementById('categoryDropdown').style.display = 'none';
+
+        if (this.isVisualizerViewActive) this.disableVisualizerView(true);
         
         this.showMusicView();
         this.settingsBtn.classList.remove('active');
@@ -2716,6 +3869,7 @@ class MusicPlayer {
 
     
     hideAllPanels() {
+        this.disableVisualizerView(false);
         document.getElementById('musicContainer').style.display = 'none';
         document.getElementById('settingsPanel').style.display = 'none';
         this.hidePlaylistDetails();
@@ -2727,6 +3881,8 @@ class MusicPlayer {
         this.hideAllPanels();
         document.getElementById('musicContainer').style.display = 'flex';
         this.leftPanel.classList.remove('download-active');
+        this.leftPanel.classList.remove('settings-active');
+        document.body.classList.remove('settings-open');
         this.currentView = 'music';
         
         // Move video back to default position if it was in main panel
@@ -2742,6 +3898,154 @@ class MusicPlayer {
         } else {
             this.hideSelectionActions();
         }
+        this.updateSelectionHeaderState();
+    }
+
+    getVisibleSongSelectionCheckboxes() {
+        return Array.from(document.querySelectorAll('.song-select[data-song-index]'));
+    }
+
+    getSongsForCurrentView() {
+        const list = Array.isArray(this.filteredSongs) && this.filteredSongs.length > 0 ? this.filteredSongs : this.songs;
+        return Array.isArray(list) ? list : [];
+    }
+
+    getSongIndicesForCurrentView() {
+        const songs = this.getSongsForCurrentView();
+        const indices = [];
+        songs.forEach(song => {
+            const idx = this.getSongIndexForSong(song);
+            if (Number.isInteger(idx) && idx >= 0) indices.push(idx);
+        });
+        return indices;
+    }
+
+    getSelectedSongIndices() {
+        return Array.from(this.selectedSongs).filter(idx => Number.isInteger(idx) && idx >= 0 && idx < this.songs.length);
+    }
+
+    getFirstSelectedSongIndex() {
+        const indices = this.getSelectedSongIndices();
+        return indices.length > 0 ? indices[0] : -1;
+    }
+
+    syncSelectionDom() {
+        const checkboxes = this.getVisibleSongSelectionCheckboxes();
+        checkboxes.forEach(cb => {
+            const idx = Number(cb.dataset.songIndex);
+            if (!Number.isInteger(idx)) return;
+            const selected = this.selectedSongs.has(idx);
+            if (cb.checked !== selected) cb.checked = selected;
+            cb.closest('.song-item')?.classList.toggle('selected', selected);
+        });
+    }
+
+    updateSelectionHeaderState() {
+        document.body.classList.toggle('selection-mode', !!this.selectionMode);
+
+        if (this.headerSelect) {
+            this.headerSelect.setAttribute('aria-hidden', this.selectionMode ? 'false' : 'true');
+        }
+
+        if (this.selectModeBtn) {
+            this.selectModeBtn.classList.toggle('active', !!this.selectionMode);
+            const img = this.selectModeBtn.querySelector('img');
+            if (img) img.src = this.selectionMode ? 'icons/ticked.png' : 'icons/unticked.png';
+        }
+
+        if (!this.selectAllSongs) return;
+
+        this.selectAllSongs.disabled = !this.selectionMode;
+
+        if (!this.selectionMode) {
+            this.selectAllSongs.checked = false;
+            this.selectAllSongs.indeterminate = false;
+            return;
+        }
+
+        const indices = this.getSongIndicesForCurrentView();
+        if (indices.length === 0) {
+            this.selectAllSongs.checked = false;
+            this.selectAllSongs.indeterminate = false;
+            return;
+        }
+
+        let selectedCount = 0;
+        indices.forEach(idx => {
+            if (this.selectedSongs.has(idx)) selectedCount++;
+        });
+
+        this.selectAllSongs.checked = selectedCount > 0 && selectedCount === indices.length;
+        this.selectAllSongs.indeterminate = selectedCount > 0 && selectedCount < indices.length;
+    }
+
+    selectAllSongsInView() {
+        const indices = this.getSongIndicesForCurrentView();
+        indices.forEach(idx => this.selectedSongs.add(idx));
+        this.syncSelectionDom();
+        this.updateSelectionUI();
+    }
+
+    deselectAllSongsInView() {
+        const indices = this.getSongIndicesForCurrentView();
+        indices.forEach(idx => this.selectedSongs.delete(idx));
+        this.syncSelectionDom();
+        this.updateSelectionUI();
+    }
+
+    toggleSelectAllInView() {
+        const indices = this.getSongIndicesForCurrentView();
+        if (indices.length === 0) return;
+
+        let selectedInView = 0;
+        indices.forEach(idx => {
+            if (this.selectedSongs.has(idx)) selectedInView++;
+        });
+
+        if (selectedInView === indices.length) {
+            this.deselectAllSongsInView();
+        } else {
+            this.selectAllSongsInView();
+        }
+    }
+
+    invertSelectionInView() {
+        const indices = this.getSongIndicesForCurrentView();
+        indices.forEach(idx => {
+            if (this.selectedSongs.has(idx)) {
+                this.selectedSongs.delete(idx);
+            } else {
+                this.selectedSongs.add(idx);
+            }
+        });
+        this.syncSelectionDom();
+        this.updateSelectionUI();
+    }
+
+    selectRangeInList(fromDisplayIndex, toDisplayIndex, songsList = null) {
+        const list = Array.isArray(songsList) ? songsList : this.getSongsForCurrentView();
+        const from = Number(fromDisplayIndex);
+        const to = Number(toDisplayIndex);
+        if (!Number.isInteger(from) || !Number.isInteger(to)) return;
+
+        const start = Math.min(from, to);
+        const end = Math.max(from, to);
+        for (let pos = start; pos <= end; pos++) {
+            const song = list[pos];
+            const idx = this.getSongIndexForSong(song);
+            if (Number.isInteger(idx) && idx >= 0) this.selectedSongs.add(idx);
+        }
+    }
+
+    clearSelectedSongs({ exitSelectionMode = false } = {}) {
+        this.selectedSongs.clear();
+        this.selectionAnchorDisplayIndex = null;
+        if (exitSelectionMode) {
+            this.disableSelectionMode();
+            return;
+        }
+        this.syncSelectionDom();
+        this.updateSelectionUI();
     }
     
     showSelectionActions(count) {
@@ -2750,41 +4054,122 @@ class MusicPlayer {
             actionBar = document.createElement('div');
             actionBar.id = 'selectionActionBar';
             actionBar.className = 'selection-action-bar';
-            
-            const removeFromPlaylistBtn = this.currentPlaylist ? 
-                '<button class="action-btn" id="removeSelectedFromPlaylist">Remove from Playlist</button>' : '';
+            actionBar.setAttribute('role', 'toolbar');
+            actionBar.setAttribute('aria-label', 'Selection actions');
             
             actionBar.innerHTML = `
-                <span class="selection-count">${count} selected</span>
-                <button class="action-btn" id="addSelectedToPlaylist">Add to Playlist</button>
-                ${removeFromPlaylistBtn}
-                <button class="action-btn" id="clearSelection">Clear</button>
+                <div class="selection-summary">
+                    <div class="selection-count-pill" aria-live="polite">
+                        <span class="selection-count-num" id="selectionCountNum">${count}</span>
+                        <span class="selection-count-text">selected</span>
+                    </div>
+                    <button class="selection-btn selection-close-btn" id="selectionDone" title="Close selection (Esc)" aria-label="Close selection">
+                        <img src="icons/close.png" alt="">
+                        <span>Close selection</span>
+                    </button>
+                </div>
+                <div class="selection-actions">
+                    <button class="selection-btn" id="selectionToggleAll" title="Select all (Ctrl+A)">
+                        <img src="icons/ticked.png" alt="">
+                        <span class="selection-btn-label">Select all</span>
+                    </button>
+                    <button class="selection-btn" id="selectionInvert" title="Invert selection (Ctrl+I)">
+                        <img src="icons/shortby.png" alt="">
+                        <span>Invert</span>
+                    </button>
+                    <div class="selection-divider" aria-hidden="true"></div>
+                    <button class="selection-btn primary" id="addSelectedToPlaylist" title="Add to playlist">
+                        <img src="icons/add-to-playlist.png" alt="">
+                        <span>Playlist</span>
+                    </button>
+                    <button class="selection-btn" id="addSelectedToQueue" title="Add to queue">
+                        <img src="icons/queue.png" alt="">
+                        <span>Queue</span>
+                    </button>
+                    <button class="selection-btn" id="removeSelectedFromPlaylist" title="Remove from current playlist" style="display: none;">
+                        <img src="icons/delete.png" alt="">
+                        <span>Remove</span>
+                    </button>
+                    <button class="selection-btn danger" id="selectionDelete" title="Delete selected songs">
+                        <span>Delete</span>
+                    </button>
+                </div>
             `;
             document.querySelector('.music-container').appendChild(actionBar);
             
             // Cache button references to avoid repeated queries
             this.addSelectedBtn = document.getElementById('addSelectedToPlaylist');
+            this.addSelectedQueueBtn = document.getElementById('addSelectedToQueue');
             this.removeSelectedBtn = document.getElementById('removeSelectedFromPlaylist');
-            this.clearSelectionBtn = document.getElementById('clearSelection');
+            this.selectionToggleAllBtn = document.getElementById('selectionToggleAll');
+            this.selectionToggleAllLabel = this.selectionToggleAllBtn?.querySelector('.selection-btn-label') || null;
+            this.selectionInvertBtn = document.getElementById('selectionInvert');
+            this.selectionDeleteBtn = document.getElementById('selectionDelete');
+            this.selectionDoneBtn = document.getElementById('selectionDone');
+            this.selectionCountNum = document.getElementById('selectionCountNum');
             
             this.addSelectedBtn.onclick = () => this.showPlaylistSelectionMenu();
+            if (this.addSelectedQueueBtn) {
+                this.addSelectedQueueBtn.onclick = () => this.addSelectedToQueue();
+            }
             if (this.removeSelectedBtn) {
                 this.removeSelectedBtn.onclick = () => this.removeSelectedFromPlaylist();
             }
-            this.clearSelectionBtn.onclick = () => this.clearSelection();
-        } else {
-            actionBar.querySelector('.selection-count').textContent = `${count} selected`;
-            
-            // Show/hide remove from playlist button based on context
-            if (this.removeSelectedBtn) {
-                this.removeSelectedBtn.style.display = this.currentPlaylist ? 'block' : 'none';
+            if (this.selectionToggleAllBtn) {
+                this.selectionToggleAllBtn.onclick = () => this.toggleSelectAllInView();
             }
+            if (this.selectionInvertBtn) {
+                this.selectionInvertBtn.onclick = () => this.invertSelectionInView();
+            }
+            if (this.selectionDeleteBtn) {
+                this.selectionDeleteBtn.onclick = () => this.deleteSelectedSongs();
+            }
+            if (this.selectionDoneBtn) {
+                this.selectionDoneBtn.onclick = () => this.disableSelectionMode();
+            }
+        } else {
+            if (this.selectionCountNum) {
+                this.selectionCountNum.textContent = String(count);
+            } else {
+                const countEl = actionBar.querySelector('#selectionCountNum');
+                if (countEl) countEl.textContent = String(count);
+            }
+        }
+
+        if (this.removeSelectedBtn) {
+            this.removeSelectedBtn.style.display = this.currentPlaylist ? '' : 'none';
+        }
+
+        const viewIndices = this.getSongIndicesForCurrentView();
+        let selectedInView = 0;
+        viewIndices.forEach(idx => {
+            if (this.selectedSongs.has(idx)) selectedInView++;
+        });
+        const allSelectedInView = viewIndices.length > 0 && selectedInView === viewIndices.length;
+
+        if (this.selectionToggleAllLabel) {
+            this.selectionToggleAllLabel.textContent = allSelectedInView ? 'Deselect all' : 'Select all';
+        }
+        if (this.selectionToggleAllBtn) {
+            this.selectionToggleAllBtn.title = allSelectedInView ? 'Deselect all (Ctrl+A)' : 'Select all (Ctrl+A)';
+            const img = this.selectionToggleAllBtn.querySelector('img');
+            if (img) img.src = allSelectedInView ? 'icons/unticked.png' : 'icons/ticked.png';
         }
     }
     
     hideSelectionActions() {
         const actionBar = document.getElementById('selectionActionBar');
         if (actionBar) actionBar.remove();
+
+        this.addSelectedBtn = null;
+        this.addSelectedQueueBtn = null;
+        this.removeSelectedBtn = null;
+        this.selectionToggleAllBtn = null;
+        this.selectionToggleAllLabel = null;
+        this.selectionInvertBtn = null;
+        this.selectionDeleteBtn = null;
+        this.selectionDoneBtn = null;
+        this.selectionCountNum = null;
     }
     
     clearSelection() {
@@ -2854,6 +4239,79 @@ class MusicPlayer {
         
         this.showNotification(`Added ${addedCount} songs to "${playlistName}"`, 'success');
     }
+
+    addSelectedToQueue() {
+        if (this.currentSongIndex < 0) {
+            this.showNotification('Please select a song first', 'error');
+            return;
+        }
+
+        const viewIndices = this.getSongIndicesForCurrentView();
+        const order = new Map();
+        viewIndices.forEach((idx, pos) => order.set(idx, pos));
+
+        const indices = Array.from(this.selectedSongs).filter(idx => Number.isInteger(idx) && idx >= 0 && idx < this.songs.length);
+        const toQueue = indices.filter(idx => idx !== this.currentSongIndex);
+
+        if (toQueue.length === 0) {
+            this.showNotification('Nothing to add to queue', 'info');
+            return;
+        }
+
+        toQueue.sort((a, b) => (order.get(a) ?? Number.MAX_SAFE_INTEGER) - (order.get(b) ?? Number.MAX_SAFE_INTEGER));
+        const existing = new Set(Array.isArray(this.queue) ? this.queue : []);
+        const unique = toQueue.filter(idx => !existing.has(idx));
+
+        if (unique.length === 0) {
+            this.showNotification('Selected songs are already in the queue', 'info');
+            return;
+        }
+
+        const limited = unique.slice(0, 20);
+        if (unique.length > 20) {
+            this.showNotification('Only the first 20 selected songs were added to the queue', 'info');
+        }
+
+        this.setPlaybackContextFromBrowseContext();
+        if (!Array.isArray(this.queue)) this.queue = [];
+        this.queue.push(...limited);
+        this.renderQueuePanelIfVisible();
+        this.showNotification(`Added ${limited.length} to queue`, 'success');
+    }
+
+    async deleteSelectedSongs() {
+        const indices = Array.from(this.selectedSongs).filter(idx => Number.isInteger(idx) && idx >= 0 && idx < this.songs.length);
+        if (indices.length === 0) {
+            this.showNotification('No songs selected', 'info');
+            return;
+        }
+
+        const count = indices.length;
+        const ok = await this.showConfirmDialog({
+            title: 'Delete selected songs?',
+            message: `This will permanently delete ${count} song${count === 1 ? '' : 's'} from disk.`,
+            confirmText: 'Delete',
+            kind: 'danger'
+        });
+        if (!ok) return;
+
+        this.showNotification(`Deleting ${count} song${count === 1 ? '' : 's'}...`, 'info');
+
+        const names = indices.map(idx => this.songs[idx]?.name).filter(Boolean);
+        const results = await Promise.allSettled(names.map(name => ipcRenderer.invoke('delete-song', name)));
+        const successCount = results.filter(r => r.status === 'fulfilled' && r.value).length;
+        const failCount = count - successCount;
+
+        if (successCount > 0) {
+            this.showNotification(`Deleted ${successCount} song${successCount === 1 ? '' : 's'}`, 'success');
+            await this.loadMusic();
+        }
+        if (failCount > 0) {
+            this.showNotification(`Failed to delete ${failCount} song${failCount === 1 ? '' : 's'}`, 'error');
+        }
+
+        this.clearSelectedSongs({ exitSelectionMode: true });
+    }
     
     removeFromPlaylist() {
         if (!this.currentPlaylist) {
@@ -2914,41 +4372,61 @@ class MusicPlayer {
         this.showNotification(`Removed ${removedCount} songs from "${this.currentPlaylist}"`, 'success');
     }
     
-    enableSelectionMode() {
+    enableSelectionMode(startIndex = null, options = {}) {
+        const { keepExisting = true, showNotification = true, hideMenu = true } = options;
+
         this.selectionMode = true;
-        this.selectedSongs.add(this.selectedSongIndex);
-        
-        // Show all checkboxes
-        document.querySelectorAll('.song-checkbox').forEach(cb => {
-            cb.style.display = 'flex';
-        });
-        
-        // Check the current song
-        const currentCheckbox = document.querySelector(`[data-song-index="${this.selectedSongIndex}"]`);
-        if (currentCheckbox) {
-            currentCheckbox.checked = true;
+        this.selectionAnchorDisplayIndex = null;
+
+        if (!keepExisting) {
+            this.selectedSongs.clear();
         }
-        
+
+        const fallbackIndex =
+            Number.isInteger(this.currentSongIndex) && this.currentSongIndex >= 0
+                ? this.currentSongIndex
+                : 0;
+        const idx = Number.isInteger(startIndex) ? startIndex : Number(startIndex);
+        const start =
+            Number.isInteger(idx) && idx >= 0 && idx < this.songs.length
+                ? idx
+                : Number.isInteger(this.selectedSongIndex) && this.selectedSongIndex >= 0 && this.selectedSongIndex < this.songs.length
+                  ? this.selectedSongIndex
+                  : fallbackIndex;
+
+        if (Number.isInteger(start) && start >= 0 && start < this.songs.length) {
+            this.selectedSongs.add(start);
+
+            const viewSongs = this.getSongsForCurrentView();
+            const startSong = this.songs[start];
+            const pos = startSong ? viewSongs.indexOf(startSong) : -1;
+            if (pos >= 0) this.selectionAnchorDisplayIndex = pos;
+        }
+
+        this.syncSelectionDom();
         this.updateSelectionUI();
-        this.hideSongContextMenu();
-        this.showNotification('Selection mode enabled', 'info');
+
+        if (hideMenu) this.hideSongContextMenu();
+        if (showNotification) this.showNotification('Selection mode enabled', 'info');
     }
     
-    disableSelectionMode() {
+    disableSelectionMode(options = {}) {
+        const { showNotification = false } = options;
+
         this.selectionMode = false;
+        this.selectionAnchorDisplayIndex = null;
         this.selectedSongs.clear();
-        
-        // Hide all checkboxes
-        document.querySelectorAll('.song-checkbox').forEach(cb => {
-            cb.style.display = 'none';
-        });
-        
-        // Uncheck all
-        document.querySelectorAll('.song-select').forEach(cb => {
+
+        // Reset visible UI state (even though the checkbox column is hidden in non-selection mode)
+        document.querySelectorAll('.song-item.selected').forEach(item => item.classList.remove('selected'));
+        document.querySelectorAll('.song-select[data-song-index]').forEach(cb => {
             cb.checked = false;
         });
-        
+
         this.hideSelectionActions();
+        this.updateSelectionHeaderState();
+
+        if (showNotification) this.showNotification('Selection mode disabled', 'info');
     }
     
     async handlePlaylistFileDrop(files, playlistName) {
@@ -3062,7 +4540,12 @@ class MusicPlayer {
         const playlistData = this.playlists[playlistName];
         const isPinned = Array.isArray(playlistData) ? false : (playlistData.pinned || false);
         const pinMenuItem = document.getElementById('pinPlaylist');
-        pinMenuItem.textContent = isPinned ? 'Unpin Playlist' : 'Pin Playlist';
+        const pinLabel = pinMenuItem?.querySelector('.menu-label');
+        if (pinLabel) {
+            pinLabel.textContent = isPinned ? 'Unpin Playlist' : 'Pin Playlist';
+        } else if (pinMenuItem) {
+            pinMenuItem.textContent = isPinned ? 'Unpin Playlist' : 'Pin Playlist';
+        }
         
         // Populate merge submenu
         const mergeSubmenu = document.getElementById('mergeSubmenu');
@@ -3072,13 +4555,24 @@ class MusicPlayer {
         if (otherPlaylists.length === 0) {
             const item = document.createElement('div');
             item.className = 'menu-item disabled';
-            item.textContent = 'No other playlists';
+            item.setAttribute('role', 'menuitem');
+            item.setAttribute('aria-disabled', 'true');
+            item.tabIndex = -1;
+            const label = document.createElement('span');
+            label.className = 'menu-label';
+            label.textContent = 'No other playlists';
+            item.appendChild(label);
             mergeSubmenu.appendChild(item);
         } else {
             otherPlaylists.forEach(name => {
                 const item = document.createElement('div');
                 item.className = 'menu-item';
-                item.textContent = name;
+                item.setAttribute('role', 'menuitem');
+                item.tabIndex = -1;
+                const label = document.createElement('span');
+                label.className = 'menu-label';
+                label.textContent = name;
+                item.appendChild(label);
                 item.onclick = () => {
                     this.performPlaylistMerge(playlistName, name);
                     this.hidePlaylistContextMenu();
@@ -3088,50 +4582,29 @@ class MusicPlayer {
         }
         
         const playlistContextMenu = document.getElementById('playlistContextMenu');
-        playlistContextMenu.style.display = 'block';
-        
-        const menuRect = playlistContextMenu.getBoundingClientRect();
-        const adjustedX = Math.min(x, window.innerWidth - menuRect.width - 10);
-        const adjustedY = Math.min(y, window.innerHeight - menuRect.height - 10);
-        
-        playlistContextMenu.style.left = `${adjustedX}px`;
-        playlistContextMenu.style.top = `${adjustedY}px`;
+        this.openContextMenu(playlistContextMenu, x, y);
     }
     
     hidePlaylistContextMenu() {
-        document.getElementById('playlistContextMenu').style.display = 'none';
+        this.closeContextMenu(document.getElementById('playlistContextMenu'));
     }
     
     showVideoContextMenu(x, y) {
         const videoContextMenu = document.getElementById('videoContextMenu');
-        videoContextMenu.style.display = 'block';
-        
-        const menuRect = videoContextMenu.getBoundingClientRect();
-        const adjustedX = Math.min(x, window.innerWidth - menuRect.width - 10);
-        const adjustedY = Math.min(y, window.innerHeight - menuRect.height - 10);
-        
-        videoContextMenu.style.left = `${adjustedX}px`;
-        videoContextMenu.style.top = `${adjustedY}px`;
+        this.openContextMenu(videoContextMenu, x, y);
     }
     
     hideVideoContextMenu() {
-        document.getElementById('videoContextMenu').style.display = 'none';
+        this.closeContextMenu(document.getElementById('videoContextMenu'));
     }
     
     showMainPanelVideoContextMenu(x, y) {
         const contextMenu = document.getElementById('mainPanelVideoContextMenu');
-        contextMenu.style.display = 'block';
-        
-        const menuRect = contextMenu.getBoundingClientRect();
-        const adjustedX = Math.min(x, window.innerWidth - menuRect.width - 10);
-        const adjustedY = Math.min(y, window.innerHeight - menuRect.height - 10);
-        
-        contextMenu.style.left = `${adjustedX}px`;
-        contextMenu.style.top = `${adjustedY}px`;
+        this.openContextMenu(contextMenu, x, y);
     }
     
     hideMainPanelVideoContextMenu() {
-        document.getElementById('mainPanelVideoContextMenu').style.display = 'none';
+        this.closeContextMenu(document.getElementById('mainPanelVideoContextMenu'));
     }
     
     switchBackToMiniPlayer() {
@@ -3154,6 +4627,7 @@ class MusicPlayer {
     }
     
     moveVideoToMainPanel() {
+        this.disableVisualizerView(false);
         this.videoInMainPanel = true;
         const leftPanel = document.getElementById('leftPanel');
         const currentTime = this.videoElement.currentTime;
@@ -3163,6 +4637,7 @@ class MusicPlayer {
         this.videoElement.pause();
         this.audio.pause();
         this.audio.src = '';
+        this.stopVisualizer();
         
         // Hide music container and show album cover
         document.getElementById('musicContainer').style.display = 'none';
@@ -3243,6 +4718,7 @@ class MusicPlayer {
             // Pause main panel video and ensure audio is stopped
             this.videoElement.pause();
             this.audio.pause();
+            this.stopVisualizer();
             
             // Get original video element
             const originalVideo = this.videoPlayer.querySelector('video');
@@ -3277,6 +4753,9 @@ class MusicPlayer {
         videoEl.onended = () => this.playNext();
         videoEl.onloadedmetadata = () => this.updateDuration();
         videoEl.ondblclick = () => this.toggleVideoAspectRatio();
+        videoEl.onclick = () => {
+            if (this.isVisualizerViewActive) this.disableVisualizerView(true);
+        };
     }
     
 
@@ -3369,8 +4848,48 @@ class MusicPlayer {
             };
         });
     }
+
+    setupSelectionUi() {
+        if (this.selectModeBtn) {
+            this.selectModeBtn.onclick = (e) => {
+                e.stopPropagation();
+                if (this.selectionMode) {
+                    this.disableSelectionMode();
+                } else {
+                    const startIndex =
+                        Number.isInteger(this.currentSongIndex) && this.currentSongIndex >= 0
+                            ? this.currentSongIndex
+                            : Number.isInteger(this.selectedSongIndex) && this.selectedSongIndex >= 0
+                              ? this.selectedSongIndex
+                              : 0;
+                    this.enableSelectionMode(startIndex, { keepExisting: false, showNotification: false, hideMenu: false });
+                }
+            };
+        }
+
+        if (this.selectAllSongs) {
+            this.selectAllSongs.onchange = (e) => {
+                if (!this.selectionMode) return;
+                const shouldSelectAll = !!e.target.checked;
+                if (shouldSelectAll) {
+                    this.selectAllSongsInView();
+                } else {
+                    this.deselectAllSongsInView();
+                }
+            };
+        }
+
+        this.updateSelectionHeaderState();
+    }
     
     sortSongs(type) {
+        const shouldPreserveSelection = this.selectionMode && this.selectedSongs.size > 0;
+        const selectedSongObjects = shouldPreserveSelection
+            ? Array.from(this.selectedSongs)
+                  .map(idx => this.songs[idx])
+                  .filter(Boolean)
+            : [];
+
         switch(type) {
             case 'title':
                 this.songs.sort((a, b) => a.title.localeCompare(b.title));
@@ -3385,7 +4904,20 @@ class MusicPlayer {
                 this.songs.sort((a, b) => (b.loadIndex || 0) - (a.loadIndex || 0));
                 break;
         }
+
+        this.rebuildSongIndexLookup();
+
+        if (shouldPreserveSelection) {
+            const nextSelection = new Set();
+            selectedSongObjects.forEach(song => {
+                const idx = this.getSongIndexForSong(song);
+                if (Number.isInteger(idx) && idx >= 0) nextSelection.add(idx);
+            });
+            this.selectedSongs = nextSelection;
+        }
+
         this.displaySongs();
+        if (this.selectionMode) this.updateSelectionUI();
     }
     
     setupResizer() {
@@ -3465,6 +4997,7 @@ class MusicPlayer {
             this.filteredSongs = results;
         }
         this.displayFilteredSongs();
+        this.renderQueuePanelIfVisible();
     }
     
     calculateRelevanceScore(song, query) {
@@ -3683,35 +5216,43 @@ class MusicPlayer {
         
         if (startIndex === 0) {
             this.songsDiv.innerHTML = '';
+            this.selectionAnchorDisplayIndex = null;
         }
         
         const fragment = document.createDocumentFragment();
         
         for (let i = startIndex; i < endIndex; i++) {
             const song = songsToShow[i];
-            const originalIndex = this.songs.indexOf(song);
-            
+            const originalIndex = this.getSongIndexForSong(song);
+            if (!Number.isInteger(originalIndex) || originalIndex < 0) continue;
+             
             const div = document.createElement('div');
             div.className = 'song-item';
             if (originalIndex === this.currentSongIndex) div.classList.add('active');
-            
+            div.dataset.songIndex = `${originalIndex}`;
+            div.dataset.displayIndex = `${i}`;
+            if (this.selectedSongs.has(originalIndex)) div.classList.add('selected');
+              
             // Defer image loading for faster initial render
             div.innerHTML = `
-                <div class="song-checkbox" style="display: none;">
-                    <input type="checkbox" class="song-select" data-song-index="${originalIndex}">
+                <div class="song-checkbox">
+                    <label class="song-select-wrap" title="Select song">
+                        <input type="checkbox" class="song-select" data-song-index="${originalIndex}" ${this.selectedSongs.has(originalIndex) ? 'checked' : ''} aria-label="Select song">
+                        <span class="song-check" aria-hidden="true"></span>
+                    </label>
                 </div>
                 <div class="song-number">${i + 1}</div>
                 <div class="song-cover">
                     <div class="cover-placeholder">🎵</div>
                 </div>
                 <div class="song-info-item">
-                    <div class="song-name">${this.escapeHtml(song.title)}</div>
+                    <div class="song-name">${this.escapeHtml(song.title)}${this.getSongDetailDotHtml(song)}</div>
                     <div class="song-artist">${this.escapeHtml(song.artist)}</div>
                 </div>
                 <div class="star-rating" data-song-index="${originalIndex}">
                     ${this.generateStars(song.rating || 0)}
                 </div>
-                <span class="badge ${this.getBadgeClass(song)}">${this.getBadgeText(song)}</span>
+                <span class="quality-indicator">${this.getQualityIndicatorHtml(song)}</span>
             `;
             
             // Load cover image asynchronously
@@ -3723,35 +5264,53 @@ class MusicPlayer {
                     }
                 }, i * 2); // Stagger image loading
             }
-            
+             
             div.onclick = (e) => {
-                if (!e.target.classList.contains('star') && !e.target.classList.contains('song-select')) {
-                    if (this.selectionMode) {
-                        // In selection mode, clicking toggles selection
-                        const checkbox = div.querySelector('.song-select');
-                        checkbox.checked = !checkbox.checked;
-                        if (checkbox.checked) {
-                            this.selectedSongs.add(originalIndex);
-                        } else {
-                            this.selectedSongs.delete(originalIndex);
-                        }
-                        this.updateSelectionUI();
+                if (e.target.closest('.song-checkbox')) return;
+                if (e.target.classList.contains('star') || e.target.closest('.star-rating')) return;
+
+                if (this.isVisualizerViewActive) this.disableVisualizerView(true);
+
+                if (this.selectionMode) {
+                    const hasAnchor = Number.isInteger(this.selectionAnchorDisplayIndex);
+                    if (e.shiftKey && hasAnchor) {
+                        if (!e.ctrlKey && !e.metaKey) this.selectedSongs.clear();
+                        this.selectRangeInList(this.selectionAnchorDisplayIndex, i, songsToShow);
+                    } else if (this.selectedSongs.has(originalIndex)) {
+                        this.selectedSongs.delete(originalIndex);
                     } else {
-                        // Normal mode, play the song
-                        this.selectSong(originalIndex);
+                        this.selectedSongs.add(originalIndex);
                     }
+
+                    this.selectionAnchorDisplayIndex = i;
+                    this.syncSelectionDom();
+                    this.updateSelectionUI();
+                    return;
                 }
+
+                // Normal mode, play the song
+                this.setPlaybackContextFromBrowseContext();
+                this.selectSong(originalIndex);
             };
-            
+              
             // Handle checkbox selection
             const checkbox = div.querySelector('.song-select');
             checkbox.onchange = (e) => {
                 e.stopPropagation();
-                if (e.target.checked) {
+
+                if (!this.selectionMode) {
+                    this.enableSelectionMode(originalIndex, { keepExisting: false, showNotification: false, hideMenu: false });
+                }
+
+                const checked = !!e.target.checked;
+                if (checked) {
                     this.selectedSongs.add(originalIndex);
                 } else {
                     this.selectedSongs.delete(originalIndex);
                 }
+
+                div.classList.toggle('selected', checked);
+                this.selectionAnchorDisplayIndex = i;
                 this.updateSelectionUI();
             };
             
@@ -3765,6 +5324,7 @@ class MusicPlayer {
         }
         
         this.songsDiv.appendChild(fragment);
+        this.updateSelectionHeaderState();
         
         if (endIndex < songsToShow.length) {
             requestAnimationFrame(() => {
@@ -3773,18 +5333,51 @@ class MusicPlayer {
         }
     }
     
-    getBadgeClass(song) {
-        if (song.isVideo) return 'video';
-        if (song.hasLyrics && song.attachedVideo) return 'has-lyrics-video';
-        if (song.attachedVideo && !song.hasLyrics) return 'has-video';
-        return song.hasLyrics ? 'has-lyrics' : '';
+    getAudioQualityLevel(song) {
+        if (!song || song.isVideo) return 'normal';
+
+        const losslessFlag = typeof song.lossless === 'boolean' ? song.lossless : null;
+        if (losslessFlag !== true) return 'normal';
+
+        const bitDepth = Number(song.bitDepth);
+        const sampleRate = Number(song.sampleRate);
+        const isHiRes =
+            Number.isFinite(bitDepth) &&
+            Number.isFinite(sampleRate) &&
+            bitDepth >= 24 &&
+            sampleRate > 44100;
+
+        return isHiRes ? 'hires' : 'lossless';
     }
-    
-    getBadgeText(song) {
-        if (song.isVideo) return '🎬';
-        if (song.hasLyrics && song.attachedVideo) return '♪';
-        if (song.attachedVideo && !song.hasLyrics) return '♫';
-        return song.hasLyrics ? '♪' : '♫';
+
+    getQualityIndicatorHtml(song) {
+        const quality = this.getAudioQualityLevel(song);
+
+        if (quality === 'hires') {
+            return `<img class="quality-icon hires" src="icons/hi-res.png" alt="Hi-Res" title="High-Resolution Lossless">`;
+        }
+
+        if (quality === 'lossless') {
+            return `<img class="quality-icon lossless" src="icons/lossless.png" alt="Lossless" title="Lossless">`;
+        }
+
+        return `<span class="quality-text" title="Normal (Lossy)">N</span>`;
+    }
+
+    getSongDetailDotHtml(song) {
+        if (!song) return '';
+        const lyricsAvailable = !!song.hasLyrics && !song.isVideo;
+        const videoAvailable = !!song.isVideo || !!song.attachedVideo || !!song.youtubeVideo;
+        const dotMode = lyricsAvailable && videoAvailable ? 'both' : lyricsAvailable ? 'has-lyrics' : videoAvailable ? 'video' : null;
+        if (!dotMode) return '';
+
+        const title =
+            dotMode === 'both'
+                ? 'Lyrics + Video available'
+                : dotMode === 'lyrics'
+                  ? 'Lyrics available'
+                  : 'Video available';
+        return `<span class="song-detail-dot ${dotMode}" title="${title}" aria-label="${title}"></span>`;
     }
     
     addStarEventListeners(songDiv, originalIndex) {
@@ -3849,10 +5442,14 @@ class MusicPlayer {
         // Reset shuffle state when toggling
         if (this.shuffleMode) {
             this.generateShuffleQueue();
+            this.pendingShuffleRegenerate = false;
         } else {
             this.shuffleHistory = [];
             this.shuffleQueue = [];
+            this.pendingShuffleRegenerate = false;
         }
+
+        this.renderQueuePanelIfVisible();
     }
     
     generateShuffleQueue() {
@@ -3914,16 +5511,91 @@ class MusicPlayer {
         
         return prevIndex;
     }
+
+    getBrowseContextDescriptor() {
+        if (this.currentPlaylist) {
+            return { type: 'playlist', playlistName: this.currentPlaylist, category: 'all' };
+        }
+
+        const category = this.currentCategory || 'all';
+        if (category && category !== 'all') {
+            return { type: 'category', playlistName: null, category };
+        }
+
+        return { type: 'all', playlistName: null, category: 'all' };
+    }
+
+    isSamePlaybackContext(next) {
+        const a = this.playbackContext;
+        const b = next;
+        if (!a || !b) return false;
+        if (a.type !== b.type) return false;
+
+        if (a.type === 'playlist') return (a.playlistName || null) === (b.playlistName || null);
+        if (a.type === 'category') return (a.category || 'all') === (b.category || 'all');
+
+        return true;
+    }
+
+    setPlaybackContext(nextContext, { deferShuffleRegenerate = true } = {}) {
+        const fallback = { type: 'all', playlistName: null, category: 'all' };
+        const next = nextContext || fallback;
+
+        if (this.isSamePlaybackContext(next)) return false;
+
+        this.playbackContext = {
+            type: next.type || 'all',
+            playlistName: next.type === 'playlist' ? next.playlistName || null : null,
+            category: next.type === 'category' ? next.category || 'all' : 'all'
+        };
+
+        if (this.shuffleMode) {
+            // Prevent using stale shuffle state from a different context.
+            this.shuffleHistory = [];
+            this.shuffleQueue = [];
+            this.pendingShuffleRegenerate = !!deferShuffleRegenerate;
+        }
+
+        this.renderQueuePanelIfVisible();
+        return true;
+    }
+
+    setPlaybackContextFromBrowseContext({ deferShuffleRegenerate = true } = {}) {
+        return this.setPlaybackContext(this.getBrowseContextDescriptor(), { deferShuffleRegenerate });
+    }
+
+    getSongsForCategory(category) {
+        const cat = category || 'all';
+
+        switch (cat) {
+            case 'video':
+                return this.songs.filter(song => song.isVideo || song.attachedVideo || song.youtubeVideo);
+            case 'rated':
+                return this.songs.filter(song => song.rating && song.rating > 0);
+            case 'recent':
+                return [...this.songs]
+                    .filter(song => song.dateAdded)
+                    .sort((a, b) => new Date(b.dateAdded) - new Date(a.dateAdded))
+                    .slice(0, 50);
+            case 'all':
+            default:
+                return this.songs;
+        }
+    }
     
     getContextSongs() {
-        // Return songs based on current context (playlist or category)
-        if (this.currentPlaylist) {
-            return this.getPlaylistSongs(this.currentPlaylist);
-        } else if (this.filteredSongs) {
-            return this.filteredSongs;
-        } else {
-            return this.songs;
+        // Return songs based on playback context (not necessarily what's currently being browsed).
+        const ctx = this.playbackContext || { type: 'all', playlistName: null, category: 'all' };
+
+        if (ctx.type === 'playlist' && ctx.playlistName) {
+            return this.getPlaylistSongs(ctx.playlistName);
         }
+
+        if (ctx.type === 'category') {
+            return this.getSongsForCategory(ctx.category);
+        }
+
+        return this.songs;
     }
     
     getNextSongInContext() {
@@ -3975,6 +5647,7 @@ class MusicPlayer {
         this.settings.repeatMode = this.repeatMode;
         this.saveSettings();
         this.updateModeButtons();
+        this.renderQueuePanelIfVisible();
     }
     
     updateModeButtons() {
@@ -3994,8 +5667,10 @@ class MusicPlayer {
     }
     
     toggleTheme() {
-        const newTheme = this.settings.theme === 'dark' ? 'light' : 'dark';
+        const currentTheme = this.settings.theme || 'dark';
+        const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
         this.settings.theme = newTheme;
+        this.settings.themeMode = newTheme;
         this.saveSettings();
         this.applyTheme(newTheme);
     }
@@ -4012,15 +5687,58 @@ class MusicPlayer {
     setupKeyboardShortcuts() {
         document.addEventListener('keydown', (e) => {
             // Prevent shortcuts when typing in input fields or when download panel is active
-            if (e.target.tagName === 'INPUT' || this.currentView === 'download') return;
-            
+            const tag = e.target?.tagName;
+            const isEditable =
+                e.target?.isContentEditable ||
+                tag === 'INPUT' ||
+                tag === 'TEXTAREA' ||
+                tag === 'SELECT';
+            if (isEditable || this.currentView === 'download') return;
+             
             // Block all Ctrl+zoom combinations
             if (e.ctrlKey && (e.code === 'Equal' || e.code === 'Minus' || e.code === 'Digit0' || 
                              e.code === 'NumpadAdd' || e.code === 'NumpadSubtract' || e.code === 'Numpad0')) {
                 e.preventDefault();
                 return;
             }
-            
+
+            if (e.code === 'Escape') {
+                if (this.selectionMode) {
+                    e.preventDefault();
+                    this.disableSelectionMode();
+                    return;
+                }
+
+                if (this.currentView === 'settings') {
+                    e.preventDefault();
+                    this.toggleSettings();
+                    return;
+                }
+            }
+
+            const isModifier = e.ctrlKey || e.metaKey;
+            if (this.selectionMode && isModifier) {
+                if (e.code === 'KeyA') {
+                    e.preventDefault();
+                    this.selectAllSongsInView();
+                    return;
+                }
+
+                if (e.code === 'KeyI') {
+                    e.preventDefault();
+                    this.invertSelectionInView();
+                    return;
+                }
+
+                if (e.code === 'KeyD') {
+                    e.preventDefault();
+                    this.clearSelectedSongs();
+                    return;
+                }
+            }
+
+            if (this.currentView === 'settings') return;
+             
             switch(e.code) {
                 case 'Space':
                     e.preventDefault();
@@ -4041,14 +5759,19 @@ class MusicPlayer {
     loadSettings() {
         try {
             const saved = localStorage.getItem('vimusic-settings');
-            this.settings = saved ? JSON.parse(saved) : {
+        this.settings = saved ? JSON.parse(saved) : {
                 volume: 1,
                 lastSongIndex: -1,
                 lastCurrentTime: 0,
                 floatingWindowPosition: { x: 100, y: 100 },
                 theme: 'dark',
+                themeMode: 'dark',
                 shuffleMode: false,
-                repeatMode: 'none'
+                repeatMode: 'none',
+                resumeLastSong: true,
+                settingsActiveTab: 'playback',
+                visualizerFps: 'auto',
+                lyricsVisible: true
             };
         } catch (error) {
             console.error('Failed to load settings:', error);
@@ -4058,15 +5781,27 @@ class MusicPlayer {
                 lastCurrentTime: 0,
                 floatingWindowPosition: { x: 100, y: 100 },
                 theme: 'dark',
+                themeMode: 'dark',
                 shuffleMode: false,
-                repeatMode: 'none'
+                repeatMode: 'none',
+                resumeLastSong: true,
+                settingsActiveTab: 'playback',
+                visualizerFps: 'auto',
+                lyricsVisible: true
             };
         }
+
+        // Migrate missing defaults without clobbering existing saved preferences
+        if (!this.settings.themeMode) this.settings.themeMode = this.settings.theme || 'dark';
+        if (this.settings.resumeLastSong === undefined) this.settings.resumeLastSong = true;
+        if (!this.settings.settingsActiveTab) this.settings.settingsActiveTab = 'playback';
+        if (!this.settings.visualizerFps) this.settings.visualizerFps = 'auto';
+        if (this.settings.lyricsVisible === undefined) this.settings.lyricsVisible = true;
         
         this.shuffleMode = this.settings.shuffleMode;
         this.repeatMode = this.settings.repeatMode;
         this.updateModeButtons();
-        this.applyTheme(this.settings.theme);
+        this.applyThemeMode();
         
         // Load song offsets
         const savedOffsets = localStorage.getItem('vimusic-song-offsets');
@@ -4223,14 +5958,15 @@ class MusicPlayer {
     }
     
     showAttachedVideo(song) {
-        this.albumCover.innerHTML = '';
+        const coverContainer = this.albumCoverMedia || this.albumCover;
+        coverContainer.innerHTML = '';
         const videoEl = document.createElement('video');
         videoEl.src = `file:///${song.attachedVideo.path.replace(/\\/g, '/')}`;
         videoEl.style.width = '100%';
         videoEl.style.height = '100%';
         videoEl.style.objectFit = 'cover';
         videoEl.style.borderRadius = '8px';
-        this.albumCover.appendChild(videoEl);
+        coverContainer.appendChild(videoEl);
         this.attachedVideoElement = videoEl;
     }
     
@@ -4366,7 +6102,8 @@ class MusicPlayer {
     setupScrollbarTimeout() {
         const scrollableElements = [
             { element: this.leftPanel, name: 'leftPanel' },
-            { element: this.musicList, name: 'musicList' }
+            { element: this.musicList, name: 'musicList' },
+            { element: this.queueList, name: 'queueList' }
         ];
         
         scrollableElements.forEach(({ element, name }) => {
@@ -4396,6 +6133,28 @@ class MusicPlayer {
         document.querySelectorAll('.settings-tab').forEach(tab => {
             tab.onclick = () => this.switchSettingsTab(tab.dataset.tab);
         });
+
+        const closeBtn = document.getElementById('settingsCloseBtn');
+        if (closeBtn) closeBtn.onclick = () => this.toggleSettings();
+
+        const openStorageFolderBtn = document.getElementById('openStorageFolderBtn');
+        if (openStorageFolderBtn) openStorageFolderBtn.onclick = () => this.viewStorageFolder();
+
+        const resetTopBtn = document.getElementById('settingsResetBtn');
+        const resetPreferencesBtn = document.getElementById('resetPreferencesBtn');
+        const handleReset = async () => {
+            const ok = await this.showConfirmDialog({
+                title: 'Reset preferences?',
+                message: 'This resets app preferences (playback, audio, theme, visualizer) to defaults. Your music library, playlists, and ratings are not deleted.',
+                confirmText: 'Reset',
+                kind: 'danger'
+            });
+            if (!ok) return;
+            this.resetPreferencesToDefaults();
+            this.showNotification('Preferences reset to defaults', 'success');
+        };
+        if (resetTopBtn) resetTopBtn.onclick = handleReset;
+        if (resetPreferencesBtn) resetPreferencesBtn.onclick = handleReset;
         
         // Setup crossfade slider
         const crossfadeSlider = document.getElementById('crossfadeSlider');
@@ -4415,22 +6174,56 @@ class MusicPlayer {
             this.settings.gaplessPlayback = gaplessToggle.checked;
             this.saveSettings();
         };
-        
-        // Setup custom dropdowns
-        this.setupCustomDropdown('outputDevice', (value) => {
-            this.settings.outputDevice = value;
-            this.saveSettings();
+
+        // Resume last song toggle
+        const resumeLastSongToggle = document.getElementById('resumeLastSongToggle');
+        if (resumeLastSongToggle) {
+            resumeLastSongToggle.onchange = () => {
+                this.settings.resumeLastSong = resumeLastSongToggle.checked;
+                this.saveSettings();
+            };
+        }
+
+        // Native selects (keyboard-friendly)
+        const bindSelect = (id, key) => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.onchange = () => {
+                this.settings[key] = el.value;
+                this.saveSettings();
+                if (id === 'visualizerFps') this.applyVisualizerFpsSetting();
+            };
+        };
+        bindSelect('outputDevice', 'outputDevice');
+        bindSelect('audioQuality', 'audioQuality');
+        bindSelect('language', 'language');
+        bindSelect('visualizerFps', 'visualizerFps');
+
+        // Theme radio group
+        document.querySelectorAll('input[name="themeMode"]').forEach(radio => {
+            radio.onchange = () => {
+                if (!radio.checked) return;
+                const mode = radio.value;
+                this.settings.themeMode = mode;
+                if (mode === 'system') {
+                    this.applyThemeMode();
+                } else {
+                    this.settings.theme = mode;
+                    this.applyTheme(mode);
+                }
+                this.saveSettings();
+            };
         });
-        
-        this.setupCustomDropdown('audioQuality', (value) => {
-            this.settings.audioQuality = value;
-            this.saveSettings();
-        });
-        
-        this.setupCustomDropdown('language', (value) => {
-            this.settings.language = value;
-            this.saveSettings();
-        });
+
+        // React to OS theme changes when in system mode
+        if (!this.systemThemeMql) {
+            this.systemThemeMql = window.matchMedia?.('(prefers-color-scheme: light)') || null;
+            if (this.systemThemeMql && typeof this.systemThemeMql.addEventListener === 'function') {
+                this.systemThemeMql.addEventListener('change', () => {
+                    if (this.settings.themeMode === 'system') this.applyThemeMode();
+                });
+            }
+        }
         
         // Setup equalizer
         this.setupEqualizer();
@@ -4453,6 +6246,41 @@ class MusicPlayer {
         
         // Load saved settings immediately
         this.loadAllSettings();
+
+        // About version
+        const versionEl = document.getElementById('settingsAppVersion');
+        if (versionEl) {
+            ipcRenderer.invoke('get-app-version').then(v => {
+                if (v) versionEl.textContent = String(v);
+            }).catch(() => {});
+        }
+    }
+
+    setupSongContextMenuDelegation() {
+        if (!this.musicList) return;
+        this.musicList.addEventListener('contextmenu', (e) => {
+            const selectionActive = this.selectionMode && this.selectedSongs.size > 0;
+            if (selectionActive) {
+                e.preventDefault();
+                const index = this.getFirstSelectedSongIndex();
+                if (Number.isInteger(index)) {
+                    this.showSongContextMenu(e.clientX, e.clientY, index, { forceMulti: true });
+                }
+                return;
+            }
+
+            const item = e.target.closest('.song-item');
+            if (item && this.musicList.contains(item)) {
+                e.preventDefault();
+                const index = Number(item.dataset.songIndex);
+                if (Number.isInteger(index)) {
+                    this.showSongContextMenu(e.clientX, e.clientY, index);
+                }
+                return;
+            }
+            e.preventDefault();
+            this.hideAllContextMenus();
+        });
     }
     
     loadAllSettings() {
@@ -4460,16 +6288,29 @@ class MusicPlayer {
         const crossfadeValue = document.getElementById('crossfadeValue');
         const gaplessToggle = document.getElementById('gaplessToggle');
         const volumeNormalization = document.getElementById('volumeNormalization');
+        const resumeLastSongToggle = document.getElementById('resumeLastSongToggle');
+        const outputDevice = document.getElementById('outputDevice');
+        const audioQuality = document.getElementById('audioQuality');
+        const language = document.getElementById('language');
+        const visualizerFps = document.getElementById('visualizerFps');
         
         const savedCrossfade = this.settings.crossfadeDuration || 0;
         crossfadeSlider.value = savedCrossfade;
         crossfadeValue.textContent = `${savedCrossfade.toFixed(1)} sec`;
         crossfadeSlider.style.setProperty('--progress', `${(savedCrossfade / 10) * 100}%`);
         gaplessToggle.checked = this.settings.gaplessPlayback || false;
-        this.setDropdownValue('outputDevice', this.settings.outputDevice || 'default');
-        this.setDropdownValue('audioQuality', this.settings.audioQuality || 'high');
-        this.setDropdownValue('language', this.settings.language || 'english');
         volumeNormalization.checked = this.settings.volumeNormalization || false;
+        if (resumeLastSongToggle) resumeLastSongToggle.checked = this.settings.resumeLastSong !== false;
+        if (outputDevice) outputDevice.value = this.settings.outputDevice || 'default';
+        if (audioQuality) audioQuality.value = this.settings.audioQuality || 'high';
+        if (language) language.value = this.settings.language || 'english';
+        if (visualizerFps) visualizerFps.value = this.settings.visualizerFps || 'auto';
+        this.applyVisualizerFpsSetting();
+
+        // Theme radios
+        const mode = this.settings.themeMode || this.settings.theme || 'dark';
+        const radio = document.querySelector(`input[name="themeMode"][value="${mode}"]`);
+        if (radio) radio.checked = true;
         
         // Load equalizer toggle state
         const equalizerEnabled = this.settings.equalizerEnabled !== false;
@@ -4478,31 +6319,162 @@ class MusicPlayer {
     }
     
     toggleSettings() {
-        const isSettingsVisible = this.settingsPanel.style.display === 'block';
+        const isSettingsVisible = window.getComputedStyle(this.settingsPanel).display !== 'none';
         
         if (isSettingsVisible) {
             this.showMusicView();
             this.settingsBtn.classList.remove('active');
         } else {
+            if (this.selectionMode) this.disableSelectionMode();
             this.hideAllPanels();
-            this.settingsPanel.style.display = 'block';
+            this.settingsPanel.style.display = 'flex';
             this.settingsBtn.classList.add('active');
+            this.leftPanel.classList.add('settings-active');
+            document.body.classList.add('settings-open');
             this.currentView = 'settings';
+            this.loadAllSettings();
+            this.switchSettingsTab(this.settings.settingsActiveTab || 'playback', { skipSave: true });
         }
     }
     
-    switchSettingsTab(tabName) {
-        // Remove active class from all tabs and content
+    switchSettingsTab(tabName, options = {}) {
+        const tabBtn = document.querySelector(`[data-tab="${tabName}"]`);
+        const nextPanel = document.getElementById(`${tabName}-content`);
+        if (!tabBtn || !nextPanel) return;
+
+        const prevPanel = document.querySelector('.settings-tab-content.active');
+        if (prevPanel && prevPanel !== nextPanel) {
+            if (!this.settingsTabScroll) this.settingsTabScroll = {};
+            this.settingsTabScroll[prevPanel.id] = prevPanel.scrollTop || 0;
+
+            prevPanel.classList.add('is-leaving');
+            prevPanel.classList.remove('active');
+            prevPanel.setAttribute('aria-hidden', 'true');
+            const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+            const leaveMs = reduce ? 0 : 200;
+            setTimeout(() => prevPanel.classList.remove('is-leaving'), leaveMs);
+        }
+
+        // Tabs
         document.querySelectorAll('.settings-tab').forEach(tab => {
-            tab.classList.remove('active');
+            const active = tab === tabBtn;
+            tab.classList.toggle('active', active);
+            tab.setAttribute('aria-selected', active ? 'true' : 'false');
         });
-        document.querySelectorAll('.settings-tab-content').forEach(content => {
-            content.classList.remove('active');
+
+        // Panels
+        document.querySelectorAll('.settings-tab-content').forEach(panel => {
+            const active = panel === nextPanel;
+            panel.classList.toggle('active', active);
+            panel.setAttribute('aria-hidden', active ? 'false' : 'true');
         });
-        
-        // Add active class to selected tab and content
-        document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
-        document.getElementById(`${tabName}-content`).classList.add('active');
+
+        if (this.settingsTabScroll && Object.prototype.hasOwnProperty.call(this.settingsTabScroll, nextPanel.id)) {
+            nextPanel.scrollTop = this.settingsTabScroll[nextPanel.id] || 0;
+        } else {
+            nextPanel.scrollTop = 0;
+        }
+
+        if (!options.skipSave) {
+            this.settings.settingsActiveTab = tabName;
+            this.saveSettings();
+        }
+    }
+
+    applyThemeMode() {
+        const mode = this.settings.themeMode || this.settings.theme || 'dark';
+        let theme = mode;
+        if (mode === 'system') {
+            const isLight = window.matchMedia?.('(prefers-color-scheme: light)')?.matches;
+            theme = isLight ? 'light' : 'dark';
+        }
+        this.settings.theme = theme;
+        this.applyTheme(theme);
+    }
+
+    applyVisualizerFpsSetting() {
+        if (!this.visualizer) return;
+        const pref = this.settings.visualizerFps || 'auto';
+        if (pref === 'auto') {
+            if (typeof this.visualizer.setAutoTargetFps === 'function') this.visualizer.setAutoTargetFps(true);
+            this.visualizer.setTargetFps(90);
+        } else {
+            if (typeof this.visualizer.setAutoTargetFps === 'function') this.visualizer.setAutoTargetFps(false);
+            this.visualizer.setTargetFps(Number(pref) || 60);
+        }
+    }
+
+    resetPreferencesToDefaults() {
+        try {
+            localStorage.removeItem('vimusic-settings');
+            localStorage.removeItem('vimusic-lyrics-font-size');
+            localStorage.removeItem('vimusic-floating-lyrics-font-size');
+            localStorage.removeItem('vimusic-floating-lyrics-color');
+        } catch (e) {}
+        this.loadSettings();
+        this.loadAllSettings();
+        this.applyLyricsVisibilityPreference();
+    }
+
+    showConfirmDialog({ title, message, confirmText = 'OK', kind = 'primary' }) {
+        return new Promise(resolve => {
+            const overlay = document.createElement('div');
+            overlay.className = 'playlist-modal-overlay';
+            overlay.innerHTML = `
+                <div class="playlist-modal" role="dialog" aria-modal="true">
+                    <h3>${this.escapeHtml(String(title || 'Confirm'))}</h3>
+                    <p style="margin: 0 0 18px 0; color: #888; font-size: 13px; line-height: 1.45;">${this.escapeHtml(String(message || ''))}</p>
+                    <div class="modal-buttons">
+                        <button id="confirmCancel">Cancel</button>
+                        <button id="confirmOk"${kind === 'danger' ? ' style=\"background:#a83232;\"' : ''}>${this.escapeHtml(String(confirmText))}</button>
+                    </div>
+                </div>
+            `;
+
+            const cleanup = (value) => {
+                document.removeEventListener('keydown', onKeyDown, true);
+                overlay.remove();
+                resolve(value);
+            };
+
+            const onKeyDown = (e) => {
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    cleanup(false);
+                }
+            };
+
+            document.addEventListener('keydown', onKeyDown, true);
+            overlay.addEventListener('click', (e) => {
+                if (e.target === overlay) cleanup(false);
+            });
+
+            document.body.appendChild(overlay);
+            const okBtn = overlay.querySelector('#confirmOk');
+            const cancelBtn = overlay.querySelector('#confirmCancel');
+            if (cancelBtn) cancelBtn.onclick = () => cleanup(false);
+            if (okBtn) okBtn.onclick = () => cleanup(true);
+            requestAnimationFrame(() => {
+                if (okBtn && typeof okBtn.focus === 'function') okBtn.focus();
+            });
+        });
+    }
+
+    setupPlayerBarSizing() {
+        const update = () => {
+            const bar = document.querySelector('.bottom-controls');
+            if (!bar) return;
+            const height = Math.round(bar.getBoundingClientRect().height || 0);
+            if (height > 0) {
+                document.documentElement.style.setProperty('--player-bar-height', `${height}px`);
+            }
+        };
+
+        update();
+        window.addEventListener('resize', update);
+        if (document.fonts && document.fonts.ready && typeof document.fonts.ready.then === 'function') {
+            document.fonts.ready.then(update).catch(() => {});
+        }
     }
     
     showScrollbar(element, name) {
@@ -4633,6 +6605,9 @@ class MusicPlayer {
             this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
             this.sourceNode = this.audioContext.createMediaElementSource(this.audio);
             this.gainNode = this.audioContext.createGain();
+            this.analyserNode = this.audioContext.createAnalyser();
+            this.analyserNode.fftSize = 2048;
+            this.analyserNode.smoothingTimeConstant = 0.0;
             
             // Create 15-band equalizer filters
             const frequencies = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 10000, 12000, 14000, 16000, 18000, 20000];
@@ -4659,7 +6634,10 @@ class MusicPlayer {
                 previousNode = filter;
             });
             previousNode.connect(this.gainNode);
-            this.gainNode.connect(this.audioContext.destination);
+            this.gainNode.connect(this.analyserNode);
+            this.analyserNode.connect(this.audioContext.destination);
+
+            if (this.visualizer) this.visualizer.setAudioSource(this.audio, this.analyserNode);
             
             this.isEqInitialized = true;
         } catch (error) {
@@ -4680,12 +6658,18 @@ class MusicPlayer {
             vocal: [-2, -1, 0, 1, 3, 4, 4, 3, 2, 1, 0, -1, -1, -2, -2]
         };
         
-        // Setup preset dropdown
-        this.setupCustomDropdown('equalizerPresets', (preset) => {
-            this.applyEqPreset(preset);
-            this.settings.eqPreset = preset;
-            this.saveSettings();
-        });
+        // Setup preset select (native for accessibility)
+        const presetSelect = document.getElementById('equalizerPresets');
+        if (presetSelect) {
+            presetSelect.onchange = () => {
+                const preset = presetSelect.value;
+                if (preset !== 'custom') {
+                    this.applyEqPreset(preset);
+                }
+                this.settings.eqPreset = preset;
+                this.saveSettings();
+            };
+        }
         
         // Setup individual sliders
         const sliders = document.querySelectorAll('.eq-slider');
@@ -4700,7 +6684,7 @@ class MusicPlayer {
                 if (!this.settings.eqValues) this.settings.eqValues = new Array(15).fill(0);
                 this.settings.eqValues[index] = value;
                 this.settings.eqPreset = 'custom';
-                this.setDropdownValue('equalizerPresets', 'custom');
+                if (presetSelect) presetSelect.value = 'custom';
                 this.updateEqGraph();
                 this.saveSettings();
             };
@@ -4718,7 +6702,7 @@ class MusicPlayer {
         // Load saved settings
         const savedPreset = this.settings.eqPreset || 'flat';
         const savedValues = this.settings.eqValues || this.eqPresets.flat;
-        this.setDropdownValue('equalizerPresets', savedPreset);
+        if (presetSelect) presetSelect.value = savedPreset;
         this.loadEqValues(savedValues);
         
         setTimeout(() => this.updateEqGraph(), 100);
@@ -4763,7 +6747,8 @@ class MusicPlayer {
     
     resetEqualizer() {
         this.applyEqPreset('flat');
-        this.setDropdownValue('equalizerPresets', 'flat');
+        const presetSelect = document.getElementById('equalizerPresets');
+        if (presetSelect) presetSelect.value = 'flat';
         this.settings.eqPreset = 'flat';
         this.settings.eqValues = [...this.eqPresets.flat];
         this.updateEqGraph();

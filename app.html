@@ -54,7 +54,6 @@
                             <div class="dropdown-item" data-category="rated"><img src="icons/star-songs.png"> Rated Songs</div>
                         </div>
                     </div>
-                    <button class="panel-action-btn" id="viewStorageFolderBtn"><img src="icons/folder.png"> View in Folder</button>
                     <button class="panel-action-btn" id="addMusicFilesBtn"><img src="icons/add.png"> Add Music Folder</button>
                     <button class="panel-action-btn" id="downloadMusicBtn"><img src="icons/download.png"> Download Music</button>
                     <div class="panel-divider"></div>
@@ -68,95 +67,186 @@
             </div>
             <div class="left-panel" id="leftPanel">
                 <div class="settings-panel" id="settingsPanel" style="display: none;">
-                    <div class="settings-header">
-                        <div class="settings-tabs">
-                            <button class="settings-tab active" data-tab="basics">Basics</button>
-                            <button class="settings-tab" data-tab="equalizer">Equalizer</button>
-                            <button class="settings-tab" data-tab="appearance">Appearance</button>
-                            <button class="settings-tab" data-tab="features">Features and Use</button>
-                            <button class="settings-tab" data-tab="about">About</button>
+                    <div class="settings-topbar">
+                        <div class="settings-topbar-title">
+                            <div class="settings-topbar-heading">Settings</div>
+                            <div class="settings-topbar-subtitle">Customize playback, audio, and visuals</div>
+                        </div>
+                        <div class="settings-topbar-actions">
+                            <button class="settings-topbar-btn" id="settingsResetBtn" title="Reset preferences to defaults">
+                                <img src="icons/refresh.png" alt="">
+                                <span>Reset</span>
+                            </button>
+                            <button class="settings-topbar-btn icon-only" id="settingsCloseBtn" title="Close settings">
+                                <img src="icons/close.png" alt="">
+                            </button>
                         </div>
                     </div>
-                    <div class="settings-content">
-                        <div class="settings-tab-content active" id="basics-content">
-                            <h3>Playback Settings</h3>
-                            <div class="setting-item">
-                                <label for="crossfadeSlider">Crossfade duration</label>
-                                <div class="slider-container">
-                                    <input type="range" id="crossfadeSlider" min="0" max="10" value="0" step="0.1">
-                                    <span id="crossfadeValue">0 sec</span>
-                                </div>
-                            </div>
-                            <div class="setting-item">
-                                <label for="gaplessToggle">Gapless Playback</label>
-                                <input type="checkbox" id="gaplessToggle" class="toggle-switch">
-                            </div>
-                            
-                            <h3>Audio Settings</h3>
-                            <div class="setting-item">
-                                <label>Output device</label>
-                                <div class="custom-dropdown" id="outputDevice">
-                                    <div class="dropdown-selected">Default</div>
-                                    <div class="dropdown-options">
-                                        <div class="dropdown-option" data-value="default">Default</div>
-                                        <div class="dropdown-option" data-value="speakers">Speakers</div>
-                                        <div class="dropdown-option" data-value="headphones">Headphones</div>
-                                        <div class="dropdown-option" data-value="bluetooth">Bluetooth devices</div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="setting-item">
-                                <label>Audio quality</label>
-                                <div class="custom-dropdown" id="audioQuality">
-                                    <div class="dropdown-selected">High</div>
-                                    <div class="dropdown-options">
-                                        <div class="dropdown-option" data-value="low">Low</div>
-                                        <div class="dropdown-option" data-value="medium">Medium</div>
-                                        <div class="dropdown-option" data-value="high">High</div>
-                                        <div class="dropdown-option" data-value="lossless">Lossless</div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="setting-item">
-                                <label for="volumeNormalization">Volume normalization</label>
-                                <input type="checkbox" id="volumeNormalization" class="toggle-switch">
-                            </div>
-                            
-                            <h3>General Settings</h3>
-                            <div class="setting-item">
-                                <label>Language</label>
-                                <div class="custom-dropdown" id="language">
-                                    <div class="dropdown-selected">English</div>
-                                    <div class="dropdown-options">
-                                        <div class="dropdown-option" data-value="english">English</div>
-                                        <div class="dropdown-option" data-value="hindi">Hindi</div>
-                                    </div>
-                                </div>
+
+                    <div class="settings-layout">
+                        <div class="settings-sidebar">
+                            <div class="settings-tabs" role="tablist" aria-label="Settings categories">
+                                <button class="settings-tab active" data-tab="playback" role="tab" aria-selected="true">Playback</button>
+                                <button class="settings-tab" data-tab="audio" role="tab" aria-selected="false">Audio</button>
+                                <button class="settings-tab" data-tab="equalizer" role="tab" aria-selected="false">Equalizer</button>
+                                <button class="settings-tab" data-tab="appearance" role="tab" aria-selected="false">Appearance</button>
+                                <button class="settings-tab" data-tab="advanced" role="tab" aria-selected="false">Advanced</button>
+                                <button class="settings-tab" data-tab="about" role="tab" aria-selected="false">About</button>
                             </div>
                         </div>
-                        <div class="settings-tab-content" id="equalizer-content">
-                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-                                <h3 style="margin: 0; border-bottom: none; padding-bottom: 0;">Equalizer</h3>
-                                <input type="checkbox" id="equalizerToggle" class="toggle-switch" checked>
-                            </div>
-                            <div class="equalizer-controls">
-                                <div class="equalizer-presets">
-                                    <div class="custom-dropdown" id="equalizerPresets">
-                                        <div class="dropdown-selected">Flat</div>
-                                        <div class="dropdown-options">
-                                            <div class="dropdown-option" data-value="flat">Flat</div>
-                                            <div class="dropdown-option" data-value="rock">Rock</div>
-                                            <div class="dropdown-option" data-value="pop">Pop</div>
-                                            <div class="dropdown-option" data-value="jazz">Jazz</div>
-                                            <div class="dropdown-option" data-value="classical">Classical</div>
-                                            <div class="dropdown-option" data-value="electronic">Electronic</div>
-                                            <div class="dropdown-option" data-value="bass-boost">Bass Boost</div>
-                                            <div class="dropdown-option" data-value="vocal">Vocal</div>
+
+                        <div class="settings-content">
+                            <div class="settings-tab-content active" id="playback-content" role="tabpanel" aria-hidden="false">
+                                <div class="settings-page-header">
+                                    <h2>Playback</h2>
+                                    <p>Control how tracks play and transition.</p>
+                                </div>
+
+                                <div class="settings-section">
+                                    <h3>Transitions</h3>
+                                    <div class="settings-card">
+                                        <div class="setting-item">
+                                            <div class="setting-label">
+                                                <label for="crossfadeSlider">Crossfade duration</label>
+                                                <div class="setting-help">Blend tracks for seamless playback.</div>
+                                            </div>
+                                            <div class="slider-container">
+                                                <input type="range" id="crossfadeSlider" min="0" max="10" value="0" step="0.1">
+                                                <span id="crossfadeValue">0 sec</span>
+                                            </div>
                                         </div>
                                     </div>
-                                    <button id="resetEqualizer" class="reset-btn">Reset</button>
                                 </div>
-                                <div class="equalizer-sliders" id="equalizerSliders">
+
+                                <div class="settings-section">
+                                    <h3>Behavior</h3>
+                                    <div class="settings-card">
+                                        <div class="setting-item">
+                                            <div class="setting-label">
+                                                <label for="gaplessToggle">Gapless playback</label>
+                                                <div class="setting-help">Avoid tiny pauses between tracks (when supported by the file).</div>
+                                            </div>
+                                            <input type="checkbox" id="gaplessToggle" class="toggle-switch">
+                                        </div>
+                                        <div class="setting-item">
+                                            <div class="setting-label">
+                                                <label for="resumeLastSongToggle">Resume last song</label>
+                                                <div class="setting-help">Reopen the last selected track on startup.</div>
+                                            </div>
+                                            <input type="checkbox" id="resumeLastSongToggle" class="toggle-switch">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="settings-tab-content" id="audio-content" role="tabpanel" aria-hidden="true">
+                                <div class="settings-page-header">
+                                    <h2>Audio</h2>
+                                    <p>Output and processing preferences.</p>
+                                </div>
+
+                                <div class="settings-section">
+                                    <h3>Output</h3>
+                                    <div class="settings-card">
+                                        <div class="setting-item">
+                                            <div class="setting-label">
+                                                <label for="outputDevice">Output device</label>
+                                                <div class="setting-help">Choose where audio is played (if supported).</div>
+                                            </div>
+                                            <select id="outputDevice" class="setting-select">
+                                                <option value="default">Default</option>
+                                                <option value="speakers">Speakers</option>
+                                                <option value="headphones">Headphones</option>
+                                                <option value="bluetooth">Bluetooth devices</option>
+                                            </select>
+                                        </div>
+                                        <div class="setting-item">
+                                            <div class="setting-label">
+                                                <label for="audioQuality">Audio quality</label>
+                                                <div class="setting-help">Stored as a preference (streaming quality control is not enabled yet).</div>
+                                            </div>
+                                            <select id="audioQuality" class="setting-select">
+                                                <option value="low">Low</option>
+                                                <option value="medium">Medium</option>
+                                                <option value="high">High</option>
+                                                <option value="lossless">Lossless</option>
+                                            </select>
+                                        </div>
+                                        <div class="setting-item">
+                                            <div class="setting-label">
+                                                <label for="volumeNormalization">Volume normalization</label>
+                                                <div class="setting-help">Keep loudness consistent across tracks.</div>
+                                            </div>
+                                            <input type="checkbox" id="volumeNormalization" class="toggle-switch">
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="settings-section">
+                                    <h3>General</h3>
+                                    <div class="settings-card">
+                                        <div class="setting-item">
+                                            <div class="setting-label">
+                                                <label for="language">Language</label>
+                                                <div class="setting-help">UI translations are limited in this build.</div>
+                                            </div>
+                                            <select id="language" class="setting-select">
+                                                <option value="english">English</option>
+                                                <option value="hindi">Hindi</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="settings-section">
+                                    <h3>Visualizer</h3>
+                                    <div class="settings-card">
+                                        <div class="setting-item">
+                                            <div class="setting-label">
+                                                <label for="visualizerFps">Refresh rate</label>
+                                                <div class="setting-help">Auto targets up to your display refresh and falls back to a stable 60fps if needed.</div>
+                                            </div>
+                                            <select id="visualizerFps" class="setting-select">
+                                                <option value="auto">Auto (Recommended)</option>
+                                                <option value="60">60 fps</option>
+                                                <option value="90">90 fps</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="settings-tab-content" id="equalizer-content" role="tabpanel" aria-hidden="true">
+                                <div class="settings-page-header settings-page-header-row">
+                                    <div>
+                                        <h2>Equalizer</h2>
+                                        <p>Adjust frequencies to match your sound.</p>
+                                    </div>
+                                    <div class="settings-inline-control">
+                                        <label class="inline-toggle">
+                                            <span>Enabled</span>
+                                            <input type="checkbox" id="equalizerToggle" class="toggle-switch" checked>
+                                        </label>
+                                    </div>
+                                </div>
+
+                                <div class="settings-card settings-card-padded">
+                                    <div class="equalizer-controls">
+                                        <div class="equalizer-presets">
+                                            <select id="equalizerPresets" class="setting-select">
+                                                <option value="flat">Flat</option>
+                                                <option value="rock">Rock</option>
+                                                <option value="pop">Pop</option>
+                                                <option value="jazz">Jazz</option>
+                                                <option value="classical">Classical</option>
+                                                <option value="electronic">Electronic</option>
+                                                <option value="bass-boost">Bass Boost</option>
+                                                <option value="vocal">Vocal</option>
+                                                <option value="custom">Custom</option>
+                                            </select>
+                                            <button id="resetEqualizer" class="reset-btn">Reset</button>
+                                        </div>
+                                        <div class="equalizer-sliders" id="equalizerSliders">
                                     <svg class="eq-graph" id="eqGraph" viewBox="0 0 100 100" preserveAspectRatio="none">
                                         <defs>
                                             <linearGradient id="eqGradient" x1="0%" y1="0%" x2="0%" y2="100%">
@@ -250,20 +340,100 @@
                                 </div>
                             </div>
                         </div>
-                        <div class="settings-tab-content" id="appearance-content">
-                            <h3>Appearance</h3>
-                            <p>Theme and appearance settings will go here.</p>
                         </div>
-                        <div class="settings-tab-content" id="features-content">
-                            <h3>Features and Use</h3>
-                            <p>Feature configuration and usage settings will go here.</p>
+
+                        <div class="settings-tab-content" id="appearance-content" role="tabpanel" aria-hidden="true">
+                            <div class="settings-page-header">
+                                <h2>Appearance</h2>
+                                <p>Theme and display preferences.</p>
+                            </div>
+
+                            <div class="settings-section">
+                                <h3>Theme</h3>
+                                <div class="settings-card">
+                                    <div class="setting-item">
+                                        <div class="setting-label">
+                                            <label>App theme</label>
+                                            <div class="setting-help">Choose dark, light, or follow your system.</div>
+                                        </div>
+                                        <div class="radio-pills" role="radiogroup" aria-label="Theme">
+                                            <label class="radio-pill">
+                                                <input type="radio" name="themeMode" value="system" id="themeSystem">
+                                                <span>System</span>
+                                            </label>
+                                            <label class="radio-pill">
+                                                <input type="radio" name="themeMode" value="dark" id="themeDark">
+                                                <span>Dark</span>
+                                            </label>
+                                            <label class="radio-pill">
+                                                <input type="radio" name="themeMode" value="light" id="themeLight">
+                                                <span>Light</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
-                        <div class="settings-tab-content" id="about-content">
-                            <h3>About</h3>
-                            <p>Application information and credits will go here.</p>
+
+                        <div class="settings-tab-content" id="advanced-content" role="tabpanel" aria-hidden="true">
+                            <div class="settings-page-header">
+                                <h2>Advanced</h2>
+                                <p>Power-user options and troubleshooting.</p>
+                            </div>
+
+                            <div class="settings-section">
+                                <h3>Storage</h3>
+                                <div class="settings-card">
+                                    <div class="setting-item">
+                                        <div class="setting-label">
+                                            <label>Open app folder</label>
+                                            <div class="setting-help">Open the app storage directory (playlists, covers, and cached files).</div>
+                                        </div>
+                                        <button id="openStorageFolderBtn" class="settings-action-btn">Open folder</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="settings-section">
+                                <h3>Reset</h3>
+                                <div class="settings-card">
+                                    <div class="setting-item">
+                                        <div class="setting-label">
+                                            <label>Reset preferences</label>
+                                            <div class="setting-help">Restore default settings without touching your music library.</div>
+                                        </div>
+                                        <button id="resetPreferencesBtn" class="settings-action-btn danger">Reset</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="settings-tab-content" id="about-content" role="tabpanel" aria-hidden="true">
+                            <div class="settings-page-header">
+                                <h2>About</h2>
+                                <p>Version and app information.</p>
+                            </div>
+
+                            <div class="settings-section">
+                                <h3>ViMusic</h3>
+                                <div class="settings-card">
+                                    <div class="setting-item">
+                                        <div class="setting-label">
+                                            <label>Version</label>
+                                            <div class="setting-help" id="settingsAppVersion">—</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="settings-section">
+                                <h3>Credits</h3>
+                                <p>Built with Electron and Web Audio APIs.</p>
+                            </div>
                         </div>
                     </div>
                 </div>
+            </div>
                 <div class="playlist-details-panel" id="playlistDetailsPanel" style="display: none;">
                     <img src="icons/edit.png" class="playlist-bg-edit-icon" id="playlistBgEditIcon" title="Change background image">
                     <div class="playlist-info">
@@ -279,6 +449,7 @@
                                 <img src="icons/edit.png" class="playlist-edit-name-icon" id="playlistEditIcon" title="Edit playlist name">
                                 <input type="text" class="playlist-title-input" id="playlistTitleInput" style="display: none;">
                             </div>
+                            <div class="playlist-meta-line" id="playlistMetaLine"></div>
                             <p class="playlist-stats" id="playlistStats">0 songs</p>
                             <p class="playlist-description" id="playlistDescription">No description</p>
                         </div>
@@ -286,6 +457,12 @@
                 </div>
                 <div class="music-container" id="musicContainer">
                     <div class="music-header">
+                        <div class="header-select" id="headerSelect" aria-hidden="true">
+                            <label class="song-select-wrap header-select-wrap" title="Select all songs">
+                                <input type="checkbox" id="selectAllSongs" class="song-select song-select-master" aria-label="Select all songs">
+                                <span class="song-check" aria-hidden="true"></span>
+                            </label>
+                        </div>
                         <div class="header-number">#</div>
                         <div class="header-cover"></div>
                         <div class="header-title">Title</div>
@@ -304,55 +481,65 @@
                         <div id="songs"></div>
                     </div>
                 </div>
+
+                <div class="visualizer-panel" id="visualizerPanel" style="display: none;">
+                    <canvas id="visualizerCanvas" class="visualizer-canvas"></canvas>
+                </div>
                 
 
                 
 
-                <div class="context-menu" id="contextMenu">
-                    <div class="menu-item" id="addMusic">Add Music Folder</div>
-                    <div class="menu-item" id="addVideo">Add Video</div>
-                    <div class="menu-item" id="addLyrics">Add Lyrics</div>
-                    <div class="menu-item" id="viewFolder">View Folder</div>
+                <div class="context-menu" id="contextMenu" role="menu" aria-hidden="true">
+                    <div class="menu-item" id="addMusic" role="menuitem" tabindex="-1"><img src="icons/folder.png" class="menu-icon" alt=""><span class="menu-label">Add Music Folder</span></div>
+                    <div class="menu-separator"></div>
+                    <div class="menu-item" id="addVideo" role="menuitem" tabindex="-1"><img src="icons/video.png" class="menu-icon" alt=""><span class="menu-label">Add Video</span></div>
+                    <div class="menu-item" id="addLyrics" role="menuitem" tabindex="-1"><img src="icons/lyrics.png" class="menu-icon" alt=""><span class="menu-label">Add Lyrics</span></div>
+                    <div class="menu-separator"></div>
+                    <div class="menu-item" id="viewFolder" role="menuitem" tabindex="-1"><img src="icons/folder2.png" class="menu-icon" alt=""><span class="menu-label">View Folder</span></div>
                 </div>
                 
-                <div class="context-menu" id="songContextMenu">
-                    <div class="menu-item submenu-parent" id="addToPlaylist">
-                        <img src="icons/add-to-playlist.png" class="menu-icon">Add to Playlist
-                        <img src="icons/right-arrow.png" class="submenu-arrow">
-                        <div class="submenu" id="playlistSubmenu"></div>
+                <div class="context-menu" id="songContextMenu" role="menu" aria-hidden="true">
+                    <div class="menu-item submenu-parent" id="addToPlaylist" role="menuitem" tabindex="-1" aria-haspopup="menu" aria-expanded="false">
+                        <img src="icons/add-to-playlist.png" class="menu-icon" alt=""><span class="menu-label">Add to Playlist</span>
+                        <img src="icons/right-arrow.png" class="submenu-arrow" alt="">
+                        <div class="submenu" id="playlistSubmenu" role="menu" aria-label="Playlists" aria-hidden="true"></div>
                     </div>
-                    <div class="menu-item" id="addToQueue"><img src="icons/queue.png" class="menu-icon">Add to Queue</div>
-                    <div class="menu-item" id="enableSelection"><img src="icons/ticked.png" class="menu-icon">Select Multiple</div>
-                    <div class="menu-item" id="removeFromPlaylist"><img src="icons/delete.png" class="menu-icon">Remove from Playlist</div>
-                    <div class="menu-item" id="removeLyrics"><img src="icons/remove-lyrics.png" class="menu-icon">Remove Lyrics</div>
-                    <div class="menu-item" id="removeVideo"><img src="icons/remove-video.png" class="menu-icon">Remove Video</div>
-                    <div class="menu-item" id="viewInFolder"><img src="icons/folder2.png" class="menu-icon">View in Folder</div>
-                    <div class="menu-item" id="deleteSong"><img src="icons/delete.png" class="menu-icon">Delete Song</div>
+                    <div class="menu-item" id="addToQueue" role="menuitem" tabindex="-1"><img src="icons/queue.png" class="menu-icon" alt=""><span class="menu-label">Add to Queue</span></div>
+                    <div class="menu-separator"></div>
+                    <div class="menu-item" id="enableSelection" role="menuitem" tabindex="-1"><img src="icons/ticked.png" class="menu-icon" alt=""><span class="menu-label">Select Multiple</span></div>
+                    <div class="menu-separator"></div>
+                    <div class="menu-item" id="removeFromPlaylist" role="menuitem" tabindex="-1"><img src="icons/delete.png" class="menu-icon" alt=""><span class="menu-label">Remove from Playlist</span></div>
+                    <div class="menu-item" id="removeLyrics" role="menuitem" tabindex="-1"><img src="icons/remove-lyrics.png" class="menu-icon" alt=""><span class="menu-label">Remove Lyrics</span></div>
+                    <div class="menu-item" id="removeVideo" role="menuitem" tabindex="-1"><img src="icons/remove-video.png" class="menu-icon" alt=""><span class="menu-label">Remove Video</span></div>
+                    <div class="menu-item" id="viewInFolder" role="menuitem" tabindex="-1"><img src="icons/folder2.png" class="menu-icon" alt=""><span class="menu-label">View in Folder</span></div>
+                    <div class="menu-separator"></div>
+                    <div class="menu-item danger" id="deleteSong" role="menuitem" tabindex="-1"><img src="icons/delete.png" class="menu-icon" alt=""><span class="menu-label">Delete Song</span></div>
                 </div>
                 
-                <div class="context-menu" id="lyricsContextMenu">
-                    <div class="menu-item" id="pasteLyrics">Paste Synced Lyrics</div>
+                <div class="context-menu" id="lyricsContextMenu" role="menu" aria-hidden="true">
+                    <div class="menu-item" id="pasteLyrics" role="menuitem" tabindex="-1"><img src="icons/lyrics.png" class="menu-icon" alt=""><span class="menu-label">Paste Synced Lyrics</span></div>
                 </div>
                 
-                <div class="context-menu" id="playlistContextMenu">
-                    <div class="menu-item" id="editPlaylist">Edit Playlist</div>
-                    <div class="menu-item submenu-parent" id="mergePlaylist">
-                        Merge With
-                        <img src="icons/right-arrow.png" class="submenu-arrow">
-                        <div class="submenu" id="mergeSubmenu"></div>
+                <div class="context-menu" id="playlistContextMenu" role="menu" aria-hidden="true">
+                    <div class="menu-item" id="editPlaylist" role="menuitem" tabindex="-1"><img src="icons/edit.png" class="menu-icon" alt=""><span class="menu-label">Edit Playlist</span></div>
+                    <div class="menu-item submenu-parent" id="mergePlaylist" role="menuitem" tabindex="-1" aria-haspopup="menu" aria-expanded="false">
+                        <img src="icons/add.png" class="menu-icon" alt=""><span class="menu-label">Merge With</span>
+                        <img src="icons/right-arrow.png" class="submenu-arrow" alt="">
+                        <div class="submenu" id="mergeSubmenu" role="menu" aria-label="Merge playlists" aria-hidden="true"></div>
                     </div>
-                    <div class="menu-item" id="pinPlaylist">Pin Playlist</div>
-                    <div class="menu-item" id="deletePlaylist">Delete Playlist</div>
+                    <div class="menu-item" id="pinPlaylist" role="menuitem" tabindex="-1"><img src="icons/star-songs.png" class="menu-icon" alt=""><span class="menu-label">Pin Playlist</span></div>
+                    <div class="menu-separator"></div>
+                    <div class="menu-item danger" id="deletePlaylist" role="menuitem" tabindex="-1"><img src="icons/delete.png" class="menu-icon" alt=""><span class="menu-label">Delete Playlist</span></div>
                 </div>
                 
-                <div class="context-menu" id="videoContextMenu">
-                    <div class="menu-item" id="playInMainPanel">Play in Main Panel</div>
-                    <div class="menu-item" id="playFullScreen">Full Screen</div>
+                <div class="context-menu" id="videoContextMenu" role="menu" aria-hidden="true">
+                    <div class="menu-item" id="playInMainPanel" role="menuitem" tabindex="-1"><img src="icons/panel.png" class="menu-icon" alt=""><span class="menu-label">Play in Main Panel</span></div>
+                    <div class="menu-item" id="playFullScreen" role="menuitem" tabindex="-1"><img src="icons/maximize.png" class="menu-icon" alt=""><span class="menu-label">Full Screen</span></div>
                 </div>
                 
-                <div class="context-menu" id="mainPanelVideoContextMenu">
-                    <div class="menu-item" id="switchBackToMiniPlayer">Switch back to Mini Player</div>
-                    <div class="menu-item" id="mainPanelFullScreen">Full Screen</div>
+                <div class="context-menu" id="mainPanelVideoContextMenu" role="menu" aria-hidden="true">
+                    <div class="menu-item" id="switchBackToMiniPlayer" role="menuitem" tabindex="-1"><img src="icons/restore-down.png" class="menu-icon" alt=""><span class="menu-label">Switch back to Mini Player</span></div>
+                    <div class="menu-item" id="mainPanelFullScreen" role="menuitem" tabindex="-1"><img src="icons/maximize.png" class="menu-icon" alt=""><span class="menu-label">Full Screen</span></div>
                 </div>
                 
                 <input type="file" id="musicFileInput" multiple accept="audio/*" style="display: none;">
@@ -365,7 +552,9 @@
             <div class="right-panel" id="rightPanel">
                 <div class="details-panel">
                     <div class="album-cover" id="albumCover">
-                        <div class="cover-placeholder">🎵</div>
+                        <div class="album-cover-media" id="albumCoverMedia">
+                            <div class="cover-placeholder">🎵</div>
+                        </div>
                     </div>
                     <div class="video-player" id="videoPlayer" style="display: none;">
                         <video id="videoElement" preload="metadata">
@@ -388,10 +577,18 @@
                         <button id="lyricsFontBtn" class="theme-btn" title="Lyrics Font Settings" style="display: none;"><img src="icons/font.png"></button>
                         <button id="offsetToggleBtn" class="theme-btn" title="Adjust Lyrics Timing"><img src="icons/clock.png"></button>
                         <button id="videoBtn" class="theme-btn" title="Toggle Video Player"><img src="icons/video.png"></button>
+                        <button id="visualizerBtn" class="theme-btn" title="Toggle Visualizer"><img src="icons/visualizer.svg"></button>
                         <button id="floatLyricsBtn" class="float-btn" title="Open Floating Lyrics Window"><img src="icons/floating.png"></button>
                     </div>
                 </div>
                 <div id="lyrics" class="lyrics"></div>
+                <div id="queuePanel" class="queue-panel" style="display: none;">
+                    <div class="queue-panel-header">
+                        <div class="queue-panel-title">Queue</div>
+                        <div id="queueMeta" class="queue-panel-meta"></div>
+                    </div>
+                    <div id="queueList" class="queue-list"></div>
+                </div>
 
                 <div class="lyrics-timing-controls" id="lyricsTimingControls" style="display: none;">
                     <button class="timing-btn" id="timingBackward">-500ms</button>
@@ -481,6 +678,7 @@
     </div>
 
 
+    <script src="visualizer.js"></script>
     <script src="app.js"></script>
 </body>
 </html>
