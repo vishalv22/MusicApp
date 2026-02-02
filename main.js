@@ -17,6 +17,14 @@ ipcMain.handle('get-app-version', () => {
 // This matters for WebGL animations (the visualizer); we still pace rendering in the renderer if needed.
 app.commandLine.appendSwitch('disable-frame-rate-limit');
 
+const APP_NAME = 'ViMusic';
+const APP_ID = 'com.vishal.vimusic';
+
+app.setName(APP_NAME);
+if (process.platform === 'win32') {
+    app.setAppUserModelId(APP_ID);
+}
+
 function createWindow() {
     // Load saved window size and position
     const settingsPath = path.join(getUserDataPath(), 'settings.json');
@@ -38,6 +46,7 @@ function createWindow() {
         height: windowSettings.height,
         x: windowSettings.x,
         y: windowSettings.y,
+        title: APP_NAME,
         webPreferences: {
             nodeIntegration: true,
             contextIsolation: false,

@@ -68,9 +68,17 @@ class MusicPlayer {
         this.queueMeta = null;
         this.queueCoverUrlCache = new Map();
 
+        // Media Session / SMTC integration
+        this.mediaSessionEnabled = false;
+        this.mediaSessionArtworkUrls = [];
+        this.mediaSessionUpdateToken = 0;
+        this.mediaSessionPositionUpdateAt = 0;
+        this.mediaSessionFallbackArtwork = 'icons/default-playlist.png';
+
         
         this.initElements();
         this.bindEvents();
+        this.initMediaSession();
         this.initVisualizer();
         this.updateMediaAvailabilityButtons(null);
         // Defer music loading to reduce startup delay
@@ -468,13 +476,17 @@ class MusicPlayer {
         
         this.audio.ontimeupdate = () => this.updateTime();
         this.audio.onended = () => this.playNext();
-        this.audio.onloadedmetadata = () => this.updateDuration();
+        this.audio.onloadedmetadata = () => {
+            this.updateDuration();
+            this.updateMediaSessionPositionState(true);
+        };
         this.audio.onplay = () => {
             if (!this.isVideoMode) {
                 this.isPlaying = true;
                 this.playPauseImg.src = 'icons/pause.png';
                 this.startVisualizer();
             }
+            this.syncMediaSessionPlaybackState();
         };
         this.audio.onpause = () => {
             if (!this.isVideoMode) {
@@ -482,17 +494,35 @@ class MusicPlayer {
                 this.playPauseImg.src = 'icons/play.png';
                 this.stopVisualizer();
             }
+            this.syncMediaSessionPlaybackState();
         };
         
         // Video event handlers
         this.videoElement.ontimeupdate = () => this.updateTime();
         this.videoElement.onended = () => this.playNext();
-        this.videoElement.onloadedmetadata = () => this.updateDuration();
+        this.videoElement.onloadedmetadata = () => {
+            this.updateDuration();
+            this.updateMediaSessionPositionState(true);
+        };
+        this.videoElement.onplay = () => {
+            if (this.isVideoMode) {
+                this.isPlaying = true;
+                this.playPauseImg.src = 'icons/pause.png';
+            }
+            this.syncMediaSessionPlaybackState();
+        };
         this.videoElement.ondblclick = () => this.toggleVideoAspectRatio();
         this.videoElement.onwaiting = () => this.handleVideoBuffering();
         this.videoElement.oncanplay = () => this.handleVideoReady();
         this.videoElement.onerror = () => this.handleVideoError();
-        this.videoElement.onpause = () => this.handleVideoPause();
+        this.videoElement.onpause = () => {
+            this.handleVideoPause();
+            if (this.isVideoMode) {
+                this.isPlaying = false;
+                this.playPauseImg.src = 'icons/play.png';
+            }
+            this.syncMediaSessionPlaybackState();
+        };
         this.videoElement.oncontextmenu = (e) => {
             if (this.isVideoMode) {
                 e.preventDefault();
@@ -597,10 +627,12 @@ class MusicPlayer {
                             this.audio.currentTime = this.settings.lastCurrentTime;
                             this.updateDuration();
                             this.updateProgress();
+                            this.updateMediaSessionPositionState(true);
                         };
                     }
                 }
             }
+            this.syncMediaSessionPlaybackState();
         } catch (error) {
             this.musicList.innerHTML = '<div id="songs"></div><p class="error">Error loading music</p>';
             this.songsDiv = document.getElementById('songs');
@@ -786,6 +818,7 @@ class MusicPlayer {
         
         // Update details based on current mode
         this.updateSongDetails(song);
+        void this.updateMediaSessionForSong(song);
         
         // Update album cover with memory leak fix
         if (this.currentImageUrl) {
@@ -912,6 +945,7 @@ class MusicPlayer {
 
         this.updateMediaAvailabilityButtons(song);
         this.renderQueuePanelIfVisible();
+        this.syncMediaSessionPlaybackState();
     }
 
     parseLyrics(text) {
@@ -987,10 +1021,12 @@ class MusicPlayer {
             this.isPlaying = false;
             this.playPauseImg.src = 'icons/play.png';
             this.stopVisualizer();
+            this.syncMediaSessionPlaybackState();
         });
         this.isPlaying = true;
         this.playPauseImg.src = 'icons/pause.png';
         this.startVisualizer();
+        this.syncMediaSessionPlaybackState();
     }
 
     pause() {
@@ -998,6 +1034,7 @@ class MusicPlayer {
         this.isPlaying = false;
         this.playPauseImg.src = 'icons/play.png';
         this.stopVisualizer();
+        this.syncMediaSessionPlaybackState();
         
         // Clear crossfade interval
         if (this.crossfadeInterval) {
@@ -1017,15 +1054,18 @@ class MusicPlayer {
                 console.error('Video playback failed:', error);
                 this.isPlaying = false;
                 this.playPauseImg.src = 'icons/play.png';
+                this.syncMediaSessionPlaybackState();
             });
             this.isPlaying = true;
             this.playPauseImg.src = 'icons/pause.png';
+            this.syncMediaSessionPlaybackState();
         } else {
             this.videoElement.load();
             this.videoElement.oncanplay = () => {
                 this.videoElement.play();
                 this.isPlaying = true;
                 this.playPauseImg.src = 'icons/pause.png';
+                this.syncMediaSessionPlaybackState();
             };
         }
     }
@@ -1035,6 +1075,7 @@ class MusicPlayer {
         this.isPlaying = false;
         this.playPauseImg.src = 'icons/play.png';
         this.stopVisualizer();
+        this.syncMediaSessionPlaybackState();
     }
     
     showVideoPlayer() {
@@ -1124,6 +1165,7 @@ class MusicPlayer {
         
         this.updateProgress();
         this.highlightLyrics(currentTime);
+        this.updateMediaSessionPositionState();
     }
 
     updateDuration() {
@@ -3077,6 +3119,236 @@ class MusicPlayer {
             this.detailArtist.textContent = song.artist;
             this.detailFormat.textContent = song.name.split('.').pop().toUpperCase();
         }
+    }
+
+    initMediaSession() {
+        if (!('mediaSession' in navigator) || typeof window.MediaMetadata === 'undefined') return;
+        this.mediaSessionEnabled = true;
+        this.setMediaSessionActionHandlers();
+        this.syncMediaSessionPlaybackState();
+    }
+
+    setMediaSessionActionHandlers() {
+        if (!this.mediaSessionEnabled) return;
+        const mediaSession = navigator.mediaSession;
+        const setHandler = (action, handler) => {
+            try {
+                mediaSession.setActionHandler(action, handler);
+            } catch {
+                // Some actions may not be supported by the current Chromium build.
+            }
+        };
+
+        setHandler('play', () => {
+            if (this.currentSongIndex < 0) return;
+            if (this.isVideoMode) this.playVideo();
+            else this.play();
+        });
+        setHandler('pause', () => {
+            if (this.isVideoMode) this.pauseVideo();
+            else this.pause();
+        });
+        setHandler('previoustrack', () => this.playPrevious(true));
+        setHandler('nexttrack', () => this.playNext(true));
+    }
+
+    syncMediaSessionPlaybackState() {
+        if (!this.mediaSessionEnabled) return;
+        if (this.currentSongIndex < 0) {
+            this.clearMediaSessionMetadata();
+            navigator.mediaSession.playbackState = 'none';
+            return;
+        }
+        navigator.mediaSession.playbackState = this.isPlaying ? 'playing' : 'paused';
+    }
+
+    updateMediaSessionPositionState(force = false) {
+        if (!this.mediaSessionEnabled) return;
+        if (typeof navigator.mediaSession.setPositionState !== 'function') return;
+
+        const now = Date.now();
+        if (!force && now - this.mediaSessionPositionUpdateAt < 1000) return;
+
+        const media = this.isVideoMode ? this.videoElement : this.audio;
+        if (!media) return;
+
+        const duration = media.duration;
+        if (!Number.isFinite(duration) || duration <= 0) return;
+
+        try {
+            navigator.mediaSession.setPositionState({
+                duration,
+                playbackRate: media.playbackRate || 1,
+                position: media.currentTime || 0
+            });
+            this.mediaSessionPositionUpdateAt = now;
+        } catch {
+            // Ignore unsupported states.
+        }
+    }
+
+    async updateMediaSessionForSong(song) {
+        if (!this.mediaSessionEnabled) return;
+        if (!song) {
+            this.clearMediaSessionMetadata();
+            return;
+        }
+
+        const updateId = ++this.mediaSessionUpdateToken;
+        const title = song.title || song.name || 'Unknown Title';
+        const artist = song.artist || 'Unknown Artist';
+        const album = song.album || '';
+
+        let artwork = [];
+        let urls = [];
+
+        try {
+            const result = await this.buildMediaSessionArtwork(song);
+            artwork = result.artwork;
+            urls = result.urls;
+        } catch (error) {
+            console.error('Failed to build media session artwork:', error);
+        }
+
+        if (updateId !== this.mediaSessionUpdateToken) {
+            this.revokeMediaSessionArtworkUrls(urls);
+            return;
+        }
+
+        try {
+            navigator.mediaSession.metadata = new MediaMetadata({
+                title,
+                artist,
+                album,
+                artwork
+            });
+        } catch (error) {
+            console.error('Failed to set media session metadata:', error);
+        }
+
+        this.replaceMediaSessionArtworkUrls(urls);
+        this.updateMediaSessionPositionState(true);
+    }
+
+    clearMediaSessionMetadata() {
+        if (!this.mediaSessionEnabled) return;
+        try {
+            navigator.mediaSession.metadata = null;
+        } catch {
+            // Ignore failures to clear metadata.
+        }
+        this.revokeMediaSessionArtworkUrls();
+    }
+
+    replaceMediaSessionArtworkUrls(urls) {
+        this.revokeMediaSessionArtworkUrls();
+        this.mediaSessionArtworkUrls = Array.isArray(urls) ? urls : [];
+    }
+
+    revokeMediaSessionArtworkUrls(urls = this.mediaSessionArtworkUrls) {
+        if (!Array.isArray(urls)) return;
+        urls.forEach(url => {
+            if (typeof url === 'string' && url.startsWith('blob:')) {
+                URL.revokeObjectURL(url);
+            }
+        });
+        if (urls === this.mediaSessionArtworkUrls) this.mediaSessionArtworkUrls = [];
+    }
+
+    async buildMediaSessionArtwork(song) {
+        const sizes = [96, 128, 256, 512];
+        const source = this.getMediaSessionArtworkSource(song);
+        if (!source) return { artwork: [], urls: [] };
+
+        const img = await this.loadArtworkImage(source.url);
+        if (source.revokeUrl) URL.revokeObjectURL(source.url);
+        if (!img) return { artwork: [], urls: [] };
+
+        return this.renderArtworkEntries(img, sizes);
+    }
+
+    getMediaSessionArtworkSource(song) {
+        if (song && song.picture) {
+            const bytes = song.picture instanceof Uint8Array ? song.picture : new Uint8Array(song.picture);
+            const mimeType = this.detectImageMimeType(bytes) || 'image/jpeg';
+            const blob = new Blob([bytes], { type: mimeType });
+            return { url: URL.createObjectURL(blob), revokeUrl: true };
+        }
+
+        try {
+            const fallbackUrl = new URL(this.mediaSessionFallbackArtwork, window.location.href).toString();
+            return { url: fallbackUrl, revokeUrl: false };
+        } catch {
+            return null;
+        }
+    }
+
+    detectImageMimeType(bytes) {
+        if (!bytes || bytes.length < 12) return null;
+        if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
+        if (bytes[0] === 0xff && bytes[1] === 0xd8) return 'image/jpeg';
+        if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return 'image/gif';
+        if (
+            bytes[0] === 0x52 &&
+            bytes[1] === 0x49 &&
+            bytes[2] === 0x46 &&
+            bytes[3] === 0x46 &&
+            bytes[8] === 0x57 &&
+            bytes[9] === 0x45 &&
+            bytes[10] === 0x42 &&
+            bytes[11] === 0x50
+        ) {
+            return 'image/webp';
+        }
+        return null;
+    }
+
+    loadArtworkImage(src) {
+        return new Promise(resolve => {
+            const img = new Image();
+            img.decoding = 'async';
+            img.onload = () => resolve(img);
+            img.onerror = () => resolve(null);
+            img.src = src;
+        });
+    }
+
+    async renderArtworkEntries(img, sizes) {
+        const artwork = [];
+        const urls = [];
+
+        for (const size of sizes) {
+            const canvas = document.createElement('canvas');
+            canvas.width = size;
+            canvas.height = size;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) continue;
+
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+
+            const scale = Math.max(size / img.width, size / img.height);
+            const drawWidth = img.width * scale;
+            const drawHeight = img.height * scale;
+            const dx = (size - drawWidth) / 2;
+            const dy = (size - drawHeight) / 2;
+
+            ctx.clearRect(0, 0, size, size);
+            ctx.drawImage(img, dx, dy, drawWidth, drawHeight);
+
+            const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+            if (!blob) continue;
+
+            const url = URL.createObjectURL(blob);
+            urls.push(url);
+            artwork.push({
+                src: url,
+                sizes: `${size}x${size}`,
+                type: 'image/png'
+            });
+        }
+
+        return { artwork, urls };
     }
     
     setupPlaylists() {
