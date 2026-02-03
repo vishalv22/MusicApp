@@ -2040,6 +2040,21 @@ body.light-theme .song-select:focus-visible + .song-check {
     border-color: rgba(255, 77, 79, 0.38);
 }
 
+.selection-btn:disabled,
+.selection-icon-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    background: rgba(255, 255, 255, 0.03);
+    border-color: rgba(255, 255, 255, 0.08);
+    transform: none;
+}
+
+.selection-btn:disabled:hover,
+.selection-icon-btn:disabled:hover {
+    background: rgba(255, 255, 255, 0.03);
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
 @media (max-width: 680px) {
     .selection-action-bar {
         border-radius: 18px;
@@ -2113,6 +2128,19 @@ body.light-theme .selection-btn:hover,
 body.light-theme .selection-icon-btn:hover {
     background: rgba(0, 0, 0, 0.05);
     border-color: rgba(0, 0, 0, 0.18);
+}
+
+body.light-theme .selection-btn:disabled,
+body.light-theme .selection-icon-btn:disabled {
+    background: rgba(0, 0, 0, 0.02);
+    border-color: rgba(0, 0, 0, 0.1);
+    color: rgba(17, 17, 17, 0.4);
+}
+
+body.light-theme .selection-btn:disabled:hover,
+body.light-theme .selection-icon-btn:disabled:hover {
+    background: rgba(0, 0, 0, 0.02);
+    border-color: rgba(0, 0, 0, 0.1);
 }
 
 body.light-theme .playlist-selection-menu {

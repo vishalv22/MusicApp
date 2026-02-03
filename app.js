@@ -1989,6 +1989,11 @@ class MusicPlayer {
         
         const selectionActive = forceMulti || (this.selectionMode && this.selectedSongs.size > 0);
         if (songContextMenu) songContextMenu.dataset.mode = selectionActive ? 'multi' : 'single';
+        const selectedIndices = selectionActive ? this.getSelectedSongIndices() : [];
+        const deleteLabel = deleteSongBtn?.querySelector('.menu-label');
+        if (deleteLabel) {
+            deleteLabel.textContent = selectionActive && selectedIndices.length > 1 ? 'Delete Songs' : 'Delete Song';
+        }
 
         // Populate playlist submenu
         const playlistSubmenu = document.getElementById('playlistSubmenu');
@@ -2029,12 +2034,11 @@ class MusicPlayer {
         }
 
         if (selectionActive) {
-            const indices = this.getSelectedSongIndices();
-            const allHaveLyrics = indices.length > 0 && indices.every(idx => {
+            const allHaveLyrics = selectedIndices.length > 0 && selectedIndices.every(idx => {
                 const s = this.songs[idx];
                 return !!s && !!s.hasLyrics && !s.isVideo;
             });
-            const allHaveVideo = indices.length > 0 && indices.every(idx => {
+            const allHaveVideo = selectedIndices.length > 0 && selectedIndices.every(idx => {
                 const s = this.songs[idx];
                 return !!s && !!s.attachedVideo;
             });
@@ -2300,26 +2304,35 @@ class MusicPlayer {
         this.hideSongContextMenu();
     }
     
-    deleteSong() {
+    async deleteSong() {
         if (this.selectedSongIndex < 0 || this.selectedSongIndex >= this.songs.length) {
             this.showNotification('Invalid song selection', 'error');
             this.hideSongContextMenu();
             return;
         }
         const song = this.songs[this.selectedSongIndex];
-        if (confirm(`Are you sure you want to delete "${song.title}"?`)) {
-            this.showNotification('Deleting song...', 'info');
-            ipcRenderer.invoke('delete-song', song.name).then((success) => {
-                if (success) {
-                    this.showNotification('Song deleted successfully', 'success');
-                    this.loadMusic();
-                } else {
-                    this.showNotification('Failed to delete song', 'error');
-                }
-            }).catch(error => {
-                this.showNotification('Error deleting song', 'error');
-            });
+        const ok = await this.showConfirmDialog({
+            title: 'Delete song?',
+            message: `This will permanently delete "${song.title}" from disk.`,
+            confirmText: 'Delete',
+            kind: 'danger'
+        });
+        if (!ok) {
+            this.hideSongContextMenu();
+            return;
         }
+
+        this.showNotification('Deleting song...', 'info');
+        ipcRenderer.invoke('delete-song', song.name).then((success) => {
+            if (success) {
+                this.showNotification('Song deleted successfully', 'success');
+                this.loadMusic();
+            } else {
+                this.showNotification('Failed to delete song', 'error');
+            }
+        }).catch(() => {
+            this.showNotification('Error deleting song', 'error');
+        });
         this.hideSongContextMenu();
     }
     
@@ -4165,7 +4178,7 @@ class MusicPlayer {
     
     updateSelectionUI() {
         const selectedCount = this.selectedSongs.size;
-        if (selectedCount > 0) {
+        if (this.selectionMode || selectedCount > 0) {
             this.showSelectionActions(selectedCount);
         } else {
             this.hideSelectionActions();
@@ -4427,6 +4440,13 @@ class MusicPlayer {
             const img = this.selectionToggleAllBtn.querySelector('img');
             if (img) img.src = allSelectedInView ? 'icons/unticked.png' : 'icons/ticked.png';
         }
+
+        const hasSelection = count > 0;
+        if (this.selectionInvertBtn) this.selectionInvertBtn.disabled = !hasSelection;
+        if (this.addSelectedBtn) this.addSelectedBtn.disabled = !hasSelection;
+        if (this.addSelectedQueueBtn) this.addSelectedQueueBtn.disabled = !hasSelection;
+        if (this.selectionDeleteBtn) this.selectionDeleteBtn.disabled = !hasSelection;
+        if (this.removeSelectedBtn) this.removeSelectedBtn.disabled = !hasSelection;
     }
     
     hideSelectionActions() {
