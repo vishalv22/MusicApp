@@ -5,6 +5,11 @@ const mm = require('music-metadata');
 
 let mainWindow;
 
+const sanitizeTitle = (value) => {
+    if (value === null || value === undefined) return '';
+    return String(value).replace(/\\/g, '').trim();
+};
+
 ipcMain.handle('get-app-version', () => {
     try {
         return app.getVersion();
@@ -278,7 +283,7 @@ ipcMain.handle('get-music-files', async () => {
             const common = metadata.common;
             const format = metadata.format || {};
              
-            const musicTitle = common.title || file.replace(/\.[^/.]+$/, '');
+            const musicTitle = sanitizeTitle(common.title || file.replace(/\.[^/.]+$/, ''));
             
             // Get file stats for dateAdded
             const stats = fs.statSync(filePath);
@@ -303,7 +308,7 @@ ipcMain.handle('get-music-files', async () => {
             });
         } catch (error) {
             // Fallback for files without metadata
-            const musicTitle = file.replace(/\.[^/.]+$/, '');
+            const musicTitle = sanitizeTitle(file.replace(/\.[^/.]+$/, ''));
             
             // Get file stats for dateAdded
             const stats = fs.statSync(filePath);
@@ -449,7 +454,7 @@ ipcMain.handle('get-video-files', async () => {
     
     for (const file of files) {
         const filePath = path.join(videoDir, file);
-        const videoTitle = file.replace(/\.[^/.]+$/, '');
+        const videoTitle = sanitizeTitle(file.replace(/\.[^/.]+$/, ''));
         
         // Get file stats for dateAdded
         const stats = fs.statSync(filePath);
