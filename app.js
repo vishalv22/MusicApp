@@ -1109,8 +1109,18 @@ class MusicPlayer {
     playNext(manual = false) {
         // Skip repeat one logic if manually clicked
         if (this.repeatMode === 'one' && !manual) {
-            this.audio.currentTime = 0;
-            this.play();
+            if (this.isVideoMode) {
+                if (this.videoElement && this.videoElement.src) {
+                    this.videoElement.currentTime = 0;
+                    this.playVideo();
+                } else {
+                    this.audio.currentTime = 0;
+                    this.play();
+                }
+            } else {
+                this.audio.currentTime = 0;
+                this.play();
+            }
             return;
         }
         
