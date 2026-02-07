@@ -2976,6 +2976,20 @@ body.light-theme .video-player {
     transform: scale(1.1);
 }
 
+.theme-btn:disabled,
+.theme-btn.disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+    background: transparent;
+    transform: none;
+}
+
+.theme-btn:disabled:hover,
+.theme-btn.disabled:hover {
+    background: transparent;
+    transform: none;
+}
+
 .theme-btn.active {
     background: #2a2a2a;
 }

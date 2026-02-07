@@ -61,6 +61,8 @@ class MusicPlayer {
         this.visualizerPanel = null;
         this.isVisualizerViewActive = false;
         this.visualizerPrevPanelState = null;
+        this.videoSourceNode = null;
+        this.videoSourceElement = null;
 
         // Queue panel (shown when lyrics are hidden)
         this.queuePanel = null;
@@ -142,6 +144,7 @@ class MusicPlayer {
         this.initPanelElements();
         
         this.playPauseBtn.disabled = true;
+        this.updateVisualizerAvailability();
     }
 
     initAudioElements() {
@@ -250,8 +253,12 @@ class MusicPlayer {
     }
 
     startVisualizer() {
-        if (!this.visualizer || !this.isVisualizerViewActive || this.isVideoMode) return;
-        if (!this.audio || this.audio.paused) return;
+        if (!this.visualizer || !this.isVisualizerViewActive) return;
+        if (this.isVideoMode && this.videoInMainPanel) return;
+        const media = this.isVideoMode ? this.videoElement : this.audio;
+        if (!media || media.paused) return;
+        this.initializeAudioContext();
+        this.syncVisualizerAudioSource();
         if (this.audioContext && typeof this.audioContext.resume === 'function') {
             this.audioContext.resume().catch(() => {});
         }
@@ -264,6 +271,7 @@ class MusicPlayer {
     }
 
     toggleVisualizerView() {
+        if (this.videoInMainPanel) return;
         if (this.isVisualizerViewActive) {
             this.disableVisualizerView(true);
         } else {
@@ -273,6 +281,10 @@ class MusicPlayer {
 
     enableVisualizerView() {
         if (this.isVisualizerViewActive) return;
+        if (this.videoInMainPanel) {
+            this.updateVisualizerAvailability();
+            return;
+        }
         if (!this.visualizerPanel || !this.visualizerCanvas) {
             console.warn('[Visualizer] visualizer panel not found; cannot enable visualizer view');
             return;
@@ -309,6 +321,7 @@ class MusicPlayer {
 
         // Ensure WebAudio graph exists before starting the renderer.
         this.initializeAudioContext();
+        this.syncVisualizerAudioSource();
         if (this.visualizer) this.visualizer.requestResize();
         this.startVisualizer();
     }
@@ -349,6 +362,51 @@ class MusicPlayer {
         }
 
         this.currentView = prev.currentView ?? 'music';
+    }
+
+    updateVisualizerAvailability() {
+        const disabled = !!this.videoInMainPanel;
+        if (this.visualizerBtn) {
+            this.visualizerBtn.disabled = disabled;
+            this.visualizerBtn.classList.toggle('disabled', disabled);
+            this.visualizerBtn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+            this.visualizerBtn.title = disabled
+                ? 'Visualizer unavailable while video is in the main panel'
+                : 'Toggle Visualizer';
+        }
+        if (disabled && this.isVisualizerViewActive) {
+            this.disableVisualizerView(false);
+        }
+    }
+
+    ensureVideoAudioSource() {
+        if (!this.audioContext || !this.gainNode) return;
+        if (!this.videoElement) return;
+        if (this.videoSourceElement === this.videoElement && this.videoSourceNode) return;
+
+        if (this.videoSourceNode) {
+            try {
+                this.videoSourceNode.disconnect();
+            } catch {}
+        }
+
+        try {
+            this.videoSourceNode = this.audioContext.createMediaElementSource(this.videoElement);
+            this.videoSourceElement = this.videoElement;
+            this.videoSourceNode.connect(this.gainNode);
+        } catch (error) {
+            console.warn('Failed to connect video audio source:', error);
+        }
+    }
+
+    syncVisualizerAudioSource() {
+        if (!this.visualizer || !this.analyserNode || !this.isVisualizerViewActive) return;
+        if (this.isVideoMode && !this.videoInMainPanel) {
+            this.ensureVideoAudioSource();
+            this.visualizer.setAudioSource(this.videoElement, this.analyserNode);
+            return;
+        }
+        this.visualizer.setAudioSource(this.audio, this.analyserNode);
     }
 
     getDefaultVisualizerColor() {
@@ -509,6 +567,7 @@ class MusicPlayer {
                 this.isPlaying = true;
                 this.playPauseImg.src = 'icons/pause.png';
             }
+            this.startVisualizer();
             this.syncMediaSessionPlaybackState();
         };
         this.videoElement.ondblclick = () => this.toggleVideoAspectRatio();
@@ -521,6 +580,7 @@ class MusicPlayer {
                 this.isPlaying = false;
                 this.playPauseImg.src = 'icons/play.png';
             }
+            this.stopVisualizer();
             this.syncMediaSessionPlaybackState();
         };
         this.videoElement.oncontextmenu = (e) => {
@@ -1047,7 +1107,9 @@ class MusicPlayer {
         // Ensure audio is completely stopped
         this.audio.pause();
         this.audio.src = '';
-        this.stopVisualizer();
+        if (this.videoInMainPanel || !this.isVisualizerViewActive) {
+            this.stopVisualizer();
+        }
         
         if (this.videoElement.readyState >= 2) {
             this.videoElement.play().catch(error => {
@@ -1058,6 +1120,7 @@ class MusicPlayer {
             });
             this.isPlaying = true;
             this.playPauseImg.src = 'icons/pause.png';
+            this.startVisualizer();
             this.syncMediaSessionPlaybackState();
         } else {
             this.videoElement.load();
@@ -1065,6 +1128,7 @@ class MusicPlayer {
                 this.videoElement.play();
                 this.isPlaying = true;
                 this.playPauseImg.src = 'icons/pause.png';
+                this.startVisualizer();
                 this.syncMediaSessionPlaybackState();
             };
         }
@@ -3044,7 +3108,6 @@ class MusicPlayer {
     
     switchToVideo() {
         const currentSong = this.songs[this.currentSongIndex];
-        if (this.isVisualizerViewActive) this.disableVisualizerView(true);
         const wasPlaying = this.isPlaying;
         const currentTime = this.audio.currentTime;
         
@@ -3078,6 +3141,8 @@ class MusicPlayer {
         if (wasPlaying) {
             this.playVideo();
         }
+
+        this.syncVisualizerAudioSource();
         
         this.showNotification('Switched to video', 'info');
     }
@@ -3122,6 +3187,8 @@ class MusicPlayer {
         if (wasPlaying) {
             this.play();
         }
+
+        this.syncVisualizerAudioSource();
         
         this.showNotification('Switched to music', 'info');
     }
@@ -4931,6 +4998,7 @@ class MusicPlayer {
     moveVideoToMainPanel() {
         this.disableVisualizerView(false);
         this.videoInMainPanel = true;
+        this.updateVisualizerAvailability();
         const leftPanel = document.getElementById('leftPanel');
         const currentTime = this.videoElement.currentTime;
         const wasPlaying = !this.videoElement.paused;
@@ -5040,6 +5108,7 @@ class MusicPlayer {
             this.mainPanelVideo.remove();
             this.mainPanelVideo = null;
             this.videoInMainPanel = false;
+            this.updateVisualizerAvailability();
             
             // Show music container and original video player
             document.getElementById('musicContainer').style.display = 'flex';
@@ -6939,7 +7008,7 @@ class MusicPlayer {
             this.gainNode.connect(this.analyserNode);
             this.analyserNode.connect(this.audioContext.destination);
 
-            if (this.visualizer) this.visualizer.setAudioSource(this.audio, this.analyserNode);
+            this.syncVisualizerAudioSource();
             
             this.isEqInitialized = true;
         } catch (error) {
