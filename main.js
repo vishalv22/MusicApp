@@ -841,6 +841,18 @@ ipcMain.handle('browse-lyrics-files', async () => {
     return result;
 });
 
+// Browse for font file
+ipcMain.handle('browse-font-file', async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+        title: 'Select Font File',
+        filters: [
+            { name: 'Font Files', extensions: ['ttf', 'otf', 'woff', 'woff2'] }
+        ],
+        properties: ['openFile']
+    });
+    return result;
+});
+
 // Check if file exists
 ipcMain.handle('file-exists', async (event, filePath) => {
     return fs.existsSync(filePath);

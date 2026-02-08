@@ -6052,7 +6052,6 @@ class MusicPlayer {
         img.src = theme === 'dark' ? 'icons/day.png' : 'icons/night.png';
         this.themeToggle.title = theme === 'dark' ? 'Light Mode' : 'Dark Mode';
     }
-    
 
     
     setupKeyboardShortcuts() {
@@ -6173,7 +6172,6 @@ class MusicPlayer {
         this.repeatMode = this.settings.repeatMode;
         this.updateModeButtons();
         this.applyThemeMode();
-        
         // Load song offsets
         const savedOffsets = localStorage.getItem('vimusic-song-offsets');
         this.songOffsets = savedOffsets ? JSON.parse(savedOffsets) : {};
@@ -6693,6 +6691,11 @@ class MusicPlayer {
         const isSettingsVisible = window.getComputedStyle(this.settingsPanel).display !== 'none';
         
         if (isSettingsVisible) {
+            if (this.settingsPrevPanelWidths) {
+                this.leftPanel.style.width = this.settingsPrevPanelWidths.left || '';
+                this.rightPanel.style.width = this.settingsPrevPanelWidths.right || '';
+                this.settingsPrevPanelWidths = null;
+            }
             this.showMusicView();
             this.settingsBtn.classList.remove('active');
         } else {
@@ -6704,7 +6707,13 @@ class MusicPlayer {
             document.body.classList.add('settings-open');
             this.currentView = 'settings';
             this.loadAllSettings();
-            this.switchSettingsTab(this.settings.settingsActiveTab || 'playback', { skipSave: true });
+            this.switchSettingsTab('playback', { skipSave: true });
+            this.settingsPrevPanelWidths = {
+                left: this.leftPanel.style.width,
+                right: this.rightPanel.style.width
+            };
+            this.leftPanel.style.width = '';
+            this.rightPanel.style.width = '';
         }
     }
     
