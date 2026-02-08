@@ -66,6 +66,7 @@ body.light-theme .search-input:focus {
     --settings-control-border-hover: rgba(255, 255, 255, 0.18);
     --settings-hover-bg: rgba(255, 255, 255, 0.06);
     --settings-active-bg: rgba(255, 255, 255, 0.1);
+    --settings-menu-bg: #141414;
 }
 
 body {
@@ -145,6 +146,7 @@ body.light-theme {
     --settings-control-border-hover: rgba(0, 0, 0, 0.18);
     --settings-hover-bg: rgba(0, 0, 0, 0.05);
     --settings-active-bg: rgba(0, 0, 0, 0.09);
+    --settings-menu-bg: #f6f6f6;
 }
 
 body.light-theme .titlebar {
@@ -3979,6 +3981,7 @@ body.light-theme .no-lyrics {
 }
 
 .setting-item .setting-select,
+.setting-item .setting-select-wrap,
 .setting-item .slider-container,
 .setting-item .settings-action-btn {
     width: 100%;
@@ -4019,6 +4022,118 @@ body.light-theme .no-lyrics {
 }
 
 .setting-select:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.setting-select-native {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    pointer-events: none;
+    appearance: none;
+    -webkit-appearance: none;
+}
+
+.setting-select-wrap {
+    position: relative;
+    width: 100%;
+    min-width: 0;
+}
+
+.setting-select-btn {
+    width: 100%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    background: var(--settings-control-bg);
+    border: 1px solid var(--settings-control-border);
+    color: var(--settings-text);
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    text-align: left;
+    transition: background 140ms ease, border-color 140ms ease, transform 140ms ease;
+}
+
+.setting-select-btn:hover {
+    border-color: var(--settings-control-border-hover);
+    background: var(--settings-hover-bg);
+}
+
+.setting-select-btn:active {
+    transform: translateY(1px);
+}
+
+.setting-select-btn:focus-visible {
+    box-shadow: 0 0 0 2px var(--settings-focus);
+}
+
+.setting-select-value {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.setting-select-chevron {
+    font-size: 11px;
+    opacity: 0.7;
+    flex: 0 0 auto;
+}
+
+.setting-select-menu {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: calc(100% + 6px);
+    background: var(--settings-menu-bg, #141414);
+    border: 1px solid var(--settings-border);
+    border-radius: 10px;
+    box-shadow: var(--settings-shadow);
+    padding: 6px;
+    display: none;
+    z-index: 2000;
+    max-height: min(260px, 45vh);
+    overflow-y: auto;
+}
+
+.setting-select-menu.open {
+    display: block;
+}
+
+.setting-select-menu.open-up {
+    top: auto;
+    bottom: calc(100% + 6px);
+}
+
+.setting-select-option {
+    width: 100%;
+    display: block;
+    border: 0;
+    background: transparent;
+    color: var(--settings-text);
+    padding: 8px 10px;
+    border-radius: 8px;
+    text-align: left;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: background 140ms ease, color 140ms ease;
+}
+
+.setting-select-option:hover {
+    background: var(--settings-hover-bg);
+}
+
+.setting-select-option.selected {
+    background: var(--settings-active-bg);
+}
+
+.setting-select-option.disabled {
     opacity: 0.5;
     cursor: not-allowed;
 }

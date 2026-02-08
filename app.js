@@ -6554,16 +6554,17 @@ class MusicPlayer {
         }
 
         // Native selects (keyboard-friendly)
-        const bindSelect = (id, key) => {
+        const bindSelect = (id, key, onChange) => {
             const el = document.getElementById(id);
             if (!el) return;
             el.onchange = () => {
                 this.settings[key] = el.value;
                 this.saveSettings();
                 if (id === 'visualizerFps') this.applyVisualizerFpsSetting();
+                if (typeof onChange === 'function') onChange(el.value);
             };
         };
-        bindSelect('outputDevice', 'outputDevice');
+        bindSelect('outputDevice', 'outputDevice', (value) => this.applyOutputDeviceSelection(value));
         bindSelect('audioQuality', 'audioQuality');
         bindSelect('language', 'language');
         bindSelect('visualizerFps', 'visualizerFps');
@@ -6583,6 +6584,9 @@ class MusicPlayer {
                 this.saveSettings();
             };
         });
+
+        this.setupCustomSelects();
+        this.setupAudioOutputDevices();
 
         // React to OS theme changes when in system mode
         if (!this.systemThemeMql) {
@@ -6623,6 +6627,237 @@ class MusicPlayer {
                 if (v) versionEl.textContent = String(v);
             }).catch(() => {});
         }
+    }
+
+    setupCustomSelects() {
+        if (this.customSelectsReady) return;
+        this.customSelectsReady = true;
+
+        const closeAllMenus = () => {
+            document.querySelectorAll('.setting-select-menu.open').forEach(menu => {
+                menu.classList.remove('open', 'open-up');
+                const btn = menu.parentElement?.querySelector('.setting-select-btn');
+                if (btn) btn.setAttribute('aria-expanded', 'false');
+            });
+        };
+
+        document.addEventListener('click', () => closeAllMenus());
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeAllMenus();
+        });
+
+        const selects = Array.from(document.querySelectorAll('.setting-select'));
+        selects.forEach(select => {
+            if (select.dataset.customized === 'true') return;
+            select.dataset.customized = 'true';
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'setting-select-wrap';
+
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'setting-select-btn';
+            button.setAttribute('aria-haspopup', 'listbox');
+            button.setAttribute('aria-expanded', 'false');
+
+            const valueSpan = document.createElement('span');
+            valueSpan.className = 'setting-select-value';
+            const chevron = document.createElement('span');
+            chevron.className = 'setting-select-chevron';
+            chevron.textContent = '▾';
+
+            button.append(valueSpan, chevron);
+
+            const menu = document.createElement('div');
+            menu.className = 'setting-select-menu';
+            menu.setAttribute('role', 'listbox');
+
+            const buildOptions = () => {
+                menu.innerHTML = '';
+                Array.from(select.options).forEach(opt => {
+                    const optionBtn = document.createElement('button');
+                    optionBtn.type = 'button';
+                    optionBtn.className = 'setting-select-option';
+                    optionBtn.setAttribute('role', 'option');
+                    optionBtn.dataset.value = opt.value;
+                    optionBtn.textContent = opt.textContent;
+                    if (opt.disabled) {
+                        optionBtn.disabled = true;
+                        optionBtn.classList.add('disabled');
+                    }
+                    if (opt.selected) {
+                        optionBtn.classList.add('selected');
+                        optionBtn.setAttribute('aria-selected', 'true');
+                    }
+                    optionBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        if (opt.disabled) return;
+                        select.value = opt.value;
+                        select.dispatchEvent(new Event('change', { bubbles: true }));
+                        updateValue();
+                        closeAllMenus();
+                    });
+                    menu.append(optionBtn);
+                });
+            };
+
+            const updateValue = () => {
+                const selected = select.selectedOptions?.[0];
+                valueSpan.textContent = selected ? selected.textContent : '';
+                Array.from(menu.children).forEach(child => {
+                    const el = child;
+                    if (!el || !el.dataset) return;
+                    const isSelected = el.dataset.value === select.value;
+                    el.classList.toggle('selected', isSelected);
+                    el.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+                });
+            };
+
+            const positionMenu = () => {
+                menu.classList.remove('open-up');
+                const menuHeight = menu.scrollHeight;
+                const rect = wrapper.getBoundingClientRect();
+                const spaceBelow = window.innerHeight - rect.bottom;
+                const spaceAbove = rect.top;
+                if (spaceBelow < menuHeight && spaceAbove > spaceBelow) {
+                    menu.classList.add('open-up');
+                }
+            };
+
+            const toggleMenu = (e) => {
+                e.stopPropagation();
+                const isOpen = menu.classList.contains('open');
+                closeAllMenus();
+                if (isOpen) return;
+                buildOptions();
+                updateValue();
+                menu.classList.add('open');
+                button.setAttribute('aria-expanded', 'true');
+                positionMenu();
+            };
+
+            button.addEventListener('click', toggleMenu);
+            select.addEventListener('change', updateValue);
+
+            select.parentNode.insertBefore(wrapper, select);
+            wrapper.appendChild(select);
+            wrapper.appendChild(button);
+            wrapper.appendChild(menu);
+            select.classList.add('setting-select-native');
+
+            updateValue();
+        });
+    }
+
+    refreshCustomSelects() {
+        const wraps = document.querySelectorAll('.setting-select-wrap');
+        wraps.forEach(wrapper => {
+            const select = wrapper.querySelector('select.setting-select');
+            const valueEl = wrapper.querySelector('.setting-select-value');
+            if (!select || !valueEl) return;
+            const selected = select.selectedOptions?.[0];
+            valueEl.textContent = selected ? selected.textContent : '';
+
+            const menu = wrapper.querySelector('.setting-select-menu');
+            if (!menu) return;
+            Array.from(menu.children).forEach(child => {
+                const el = child;
+                if (!el || !el.dataset) return;
+                const isSelected = el.dataset.value === select.value;
+                el.classList.toggle('selected', isSelected);
+                el.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+            });
+        });
+    }
+
+    async setupAudioOutputDevices() {
+        this.outputDeviceSelect = document.getElementById('outputDevice');
+        if (!this.outputDeviceSelect || !navigator.mediaDevices?.enumerateDevices) return;
+
+        if (!this.audioOutputDevicesReady) {
+            this.audioOutputDevicesReady = true;
+            if (navigator.mediaDevices?.addEventListener) {
+                navigator.mediaDevices.addEventListener('devicechange', () => {
+                    void this.updateAudioOutputDevices();
+                });
+            }
+        }
+
+        await this.updateAudioOutputDevices();
+    }
+
+    async updateAudioOutputDevices() {
+        const outputs = await this.getAudioOutputDevices();
+        this.renderAudioOutputOptions(outputs);
+    }
+
+    async getAudioOutputDevices() {
+        const enumerate = async () => {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            return devices.filter(device => device.kind === 'audiooutput');
+        };
+
+        let outputs = [];
+        try {
+            outputs = await enumerate();
+        } catch (error) {
+            return outputs;
+        }
+
+        const hasLabels = outputs.some(device => (device.label || '').trim().length > 0);
+        if (!hasLabels && navigator.mediaDevices.getUserMedia) {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                stream.getTracks().forEach(track => track.stop());
+                outputs = await enumerate();
+            } catch (error) {
+                // Permission denied or not available; fall back to generic labels.
+            }
+        }
+
+        return outputs;
+    }
+
+    renderAudioOutputOptions(outputs) {
+        const select = this.outputDeviceSelect;
+        if (!select) return;
+
+        const current = this.settings.outputDevice || 'default';
+        select.innerHTML = '';
+        select.appendChild(new Option('System default', 'default'));
+
+        let index = 1;
+        outputs.forEach(device => {
+            if (!device.deviceId || device.deviceId === 'default') return;
+            const label = (device.label || '').trim() || `Output device ${index++}`;
+            select.appendChild(new Option(label, device.deviceId));
+        });
+
+        const hasCurrent = Array.from(select.options).some(opt => opt.value === current);
+        select.value = hasCurrent ? current : 'default';
+        if (!hasCurrent && current !== 'default') {
+            this.settings.outputDevice = 'default';
+            this.saveSettings();
+        }
+
+        this.applyOutputDeviceSelection(select.value);
+        this.refreshCustomSelects();
+    }
+
+    async applyOutputDeviceSelection(deviceId) {
+        const targetId = deviceId || 'default';
+        const applyTo = async (element) => {
+            if (!element || typeof element.setSinkId !== 'function') return;
+            try {
+                await element.setSinkId(targetId);
+            } catch (error) {
+                console.warn('Failed to set output device:', error);
+            }
+        };
+
+        await applyTo(this.audio);
+        await applyTo(this.videoElement);
+        await applyTo(this.nextAudio);
     }
 
     setupSongContextMenuDelegation() {
@@ -6675,6 +6910,9 @@ class MusicPlayer {
         if (language) language.value = this.settings.language || 'english';
         if (visualizerFps) visualizerFps.value = this.settings.visualizerFps || 'auto';
         this.applyVisualizerFpsSetting();
+        this.applyOutputDeviceSelection(this.settings.outputDevice || 'default');
+
+        this.refreshCustomSelects();
 
         // Theme radios
         const mode = this.settings.themeMode || this.settings.theme || 'dark';
@@ -7184,6 +7422,7 @@ class MusicPlayer {
                 this.nextAudio.src = '';
             }
             this.nextAudio = new Audio(`file:///${nextSong.path.replace(/\\/g, '/')}`);
+            this.applyOutputDeviceSelection(this.settings.outputDevice || 'default');
             this.nextAudio.preload = 'auto';
         }
     }
