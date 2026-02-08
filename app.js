@@ -6587,6 +6587,7 @@ class MusicPlayer {
 
         this.setupCustomSelects();
         this.setupAudioOutputDevices();
+        this.setupSettingsScrollSpy();
 
         // React to OS theme changes when in system mode
         if (!this.systemThemeMql) {
@@ -6770,6 +6771,110 @@ class MusicPlayer {
         });
     }
 
+    setupSettingsScrollSpy() {
+        if (this.settingsScrollSpyReady) return;
+        this.settingsScrollSpyReady = true;
+
+        const container = document.querySelector('.settings-content');
+        if (!container) return;
+
+        const sections = Array.from(document.querySelectorAll('.settings-tab-content'));
+        if (sections.length === 0) return;
+
+        const observer = new IntersectionObserver((entries) => {
+            if (this.currentView !== 'settings') return;
+
+            const visible = entries.filter(entry => entry.isIntersecting);
+            if (visible.length === 0) return;
+
+            visible.sort((a, b) => {
+                if (b.intersectionRatio !== a.intersectionRatio) {
+                    return b.intersectionRatio - a.intersectionRatio;
+                }
+                return a.boundingClientRect.top - b.boundingClientRect.top;
+            });
+
+            const target = visible[0].target;
+            const tabName = target.id?.replace('-content', '');
+            if (tabName) {
+                this.updateSettingsTabHighlight(tabName, { save: false, source: 'scroll' });
+            }
+        }, {
+            root: container,
+            rootMargin: '-25% 0px -60% 0px',
+            threshold: [0, 0.1, 0.25, 0.5, 0.75, 1]
+        });
+
+        sections.forEach(section => observer.observe(section));
+        this.settingsScrollSpy = observer;
+    }
+
+    updateSettingsTabHighlight(tabName, { save = true, source = 'click' } = {}) {
+        const tabBtn = document.querySelector(`[data-tab="${tabName}"]`);
+        if (!tabBtn) return;
+
+        if (this.settingsActiveTab === tabName) return;
+        this.settingsActiveTab = tabName;
+
+        document.querySelectorAll('.settings-tab').forEach(tab => {
+            const active = tab === tabBtn;
+            tab.classList.toggle('active', active);
+            tab.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
+
+        if (save) {
+            this.settings.settingsActiveTab = tabName;
+            this.saveSettings();
+        } else if (source === 'scroll') {
+            this.queueSettingsActiveTabSave(tabName);
+        }
+    }
+
+    queueSettingsActiveTabSave(tabName) {
+        this.settings.settingsActiveTab = tabName;
+        if (this.settingsActiveTabSaveTimer) {
+            clearTimeout(this.settingsActiveTabSaveTimer);
+        }
+        this.settingsActiveTabSaveTimer = setTimeout(() => {
+            this.saveSettings();
+            this.settingsActiveTabSaveTimer = null;
+        }, 350);
+    }
+
+    smoothScrollTo(container, targetTop, duration = 220) {
+        if (!container) return;
+        if (this.settingsScrollAnim) {
+            cancelAnimationFrame(this.settingsScrollAnim);
+            this.settingsScrollAnim = null;
+        }
+
+        const startTop = container.scrollTop;
+        const delta = targetTop - startTop;
+        if (Math.abs(delta) < 2 || duration <= 0) {
+            container.scrollTop = targetTop;
+            return;
+        }
+
+        const startTime = performance.now();
+        const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+
+        const step = (now) => {
+            const elapsed = now - startTime;
+            const progress = Math.min(1, elapsed / duration);
+            const eased = easeOutCubic(progress);
+            container.scrollTop = startTop + delta * eased;
+            if (progress < 1) {
+                this.settingsScrollAnim = requestAnimationFrame(step);
+            } else {
+                this.settingsScrollAnim = null;
+            }
+        };
+
+        this.settingsScrollAnim = requestAnimationFrame(step);
+    }
+
+
+
     async setupAudioOutputDevices() {
         this.outputDeviceSelect = document.getElementById('outputDevice');
         if (!this.outputDeviceSelect || !navigator.mediaDevices?.enumerateDevices) return;
@@ -6945,7 +7050,7 @@ class MusicPlayer {
             document.body.classList.add('settings-open');
             this.currentView = 'settings';
             this.loadAllSettings();
-            this.switchSettingsTab('playback', { skipSave: true });
+            this.switchSettingsTab(this.settings.settingsActiveTab || 'playback', { skipSave: true });
             this.settingsPrevPanelWidths = {
                 left: this.leftPanel.style.width,
                 right: this.rightPanel.style.width
@@ -6960,42 +7065,22 @@ class MusicPlayer {
         const nextPanel = document.getElementById(`${tabName}-content`);
         if (!tabBtn || !nextPanel) return;
 
-        const prevPanel = document.querySelector('.settings-tab-content.active');
-        if (prevPanel && prevPanel !== nextPanel) {
-            if (!this.settingsTabScroll) this.settingsTabScroll = {};
-            this.settingsTabScroll[prevPanel.id] = prevPanel.scrollTop || 0;
+        this.updateSettingsTabHighlight(tabName, { save: !options.skipSave, source: 'click' });
 
-            prevPanel.classList.add('is-leaving');
-            prevPanel.classList.remove('active');
-            prevPanel.setAttribute('aria-hidden', 'true');
+        const scrollContainer = document.querySelector('.settings-content');
+        if (scrollContainer) {
             const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
-            const leaveMs = reduce ? 0 : 200;
-            setTimeout(() => prevPanel.classList.remove('is-leaving'), leaveMs);
+            const maxTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+            const top = Math.min(Math.max(nextPanel.offsetTop, 0), maxTop);
+            if (reduce) {
+                scrollContainer.scrollTop = top;
+            } else {
+                this.smoothScrollTo(scrollContainer, top, 220);
+            }
         }
 
-        // Tabs
-        document.querySelectorAll('.settings-tab').forEach(tab => {
-            const active = tab === tabBtn;
-            tab.classList.toggle('active', active);
-            tab.setAttribute('aria-selected', active ? 'true' : 'false');
-        });
-
-        // Panels
-        document.querySelectorAll('.settings-tab-content').forEach(panel => {
-            const active = panel === nextPanel;
-            panel.classList.toggle('active', active);
-            panel.setAttribute('aria-hidden', active ? 'false' : 'true');
-        });
-
-        if (this.settingsTabScroll && Object.prototype.hasOwnProperty.call(this.settingsTabScroll, nextPanel.id)) {
-            nextPanel.scrollTop = this.settingsTabScroll[nextPanel.id] || 0;
-        } else {
-            nextPanel.scrollTop = 0;
-        }
-
-        if (!options.skipSave) {
+        if (options.skipSave) {
             this.settings.settingsActiveTab = tabName;
-            this.saveSettings();
         }
     }
 
