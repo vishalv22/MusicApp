@@ -35,6 +35,11 @@
         "from": "python-portable/",
         "to": "python/",
         "filter": ["**/*"]
+      },
+      {
+        "from": "dab-downloader/bin/",
+        "to": "dab-downloader/bin/",
+        "filter": ["**/*"]
       }
     ],
     "asar": false,

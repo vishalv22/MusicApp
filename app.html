@@ -431,9 +431,80 @@
                     </div>
                 </div>
             </div>
-                <div class="playlist-details-panel" id="playlistDetailsPanel" style="display: none;">
-                    <img src="icons/edit.png" class="playlist-bg-edit-icon" id="playlistBgEditIcon" title="Change background image">
-                    <div class="playlist-info">
+            <div class="download-panel" id="downloadPanel" style="display: none;">
+                <div class="download-header">
+                    <div>
+                        <div class="download-title">Download Music</div>
+                        <div class="download-subtitle" id="downloadSubtitle">Search the online catalog and download to Music/ViMusic.</div>
+                    </div>
+                    <div class="download-header-actions">
+                        <div class="download-logged-in-actions" id="downloadLoggedInActions" style="display: none;">
+                            <div class="download-user" id="downloadUserBadge">
+                                <img src="icons/user.svg" alt="">
+                                <span id="downloadUserName">User</span>
+                            </div>
+                            <button class="download-btn ghost" id="downloadLogsToggleBtn">Logs</button>
+                            <button class="download-icon-btn logout" id="dabLogoutBtn" title="Logout" aria-label="Logout">
+                                <img src="icons/logout.svg" alt="Logout">
+                            </button>
+                        </div>
+                        <button class="download-close" id="downloadCloseBtn" title="Close">
+                            <img src="icons/close.png" alt="">
+                        </button>
+                    </div>
+                </div>
+
+                <div class="download-card download-auth-card" id="downloadAuthCard">
+                    <div class="download-auth-header">
+                        <div class="download-auth-title">Login</div>
+                        <div class="download-auth-subtitle">
+                            You need to sign up to download music, or log in if you already have an account.
+                        </div>
+                    </div>
+                    <div class="download-auth-fields" id="downloadAuthFields">
+                        <div class="download-field">
+                            <label for="dabEmailInput">Email</label>
+                            <input type="text" id="dabEmailInput" placeholder="your.email@example.com">
+                        </div>
+                        <div class="download-field">
+                            <label for="dabPasswordInput">Password</label>
+                            <input type="password" id="dabPasswordInput" placeholder="Password">
+                        </div>
+                        <div class="download-auth-links">Forgot password?</div>
+                        <button class="download-btn primary download-login-btn" id="dabLoginBtn">Login</button>
+                        <div class="download-auth-footer">Don't have an account? <span>Register</span></div>
+                    </div>
+                    <div class="download-status" id="dabStatus">Not logged in</div>
+                </div>
+
+                <div class="download-post-login" id="downloadPostLogin" style="display: none;">
+                    <div class="download-card download-results-card">
+                        <div class="download-card-title download-card-row">
+                            <span>Search</span>
+                            <div class="download-tabs" id="downloadSearchTabs">
+                                <button class="download-tab active" data-type="track">Tracks</button>
+                                <button class="download-tab" data-type="album">Albums</button>
+                                <button class="download-tab" data-type="artist">Artists</button>
+                            </div>
+                        </div>
+                        <div class="download-results-status" id="downloadResultsStatus">
+                            Use the top search bar and press Enter.
+                        </div>
+                        <div id="downloadResults" class="download-results"></div>
+                        <div class="download-logs-panel" id="downloadLogsPanel" style="display: none;">
+                            <div class="download-logs-header">
+                                <span>Activity</span>
+                                <button class="download-btn ghost" id="downloadClearLogsBtn">Clear</button>
+                            </div>
+                            <div id="downloadStatus" class="download-status">Idle</div>
+                            <div id="downloadLogs" class="download-logs"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="playlist-details-panel" id="playlistDetailsPanel" style="display: none;">
+                <img src="icons/edit.png" class="playlist-bg-edit-icon" id="playlistBgEditIcon" title="Change background image">
+                <div class="playlist-info">
                         <div class="playlist-cover" id="playlistCover">
                             <img src="icons/playlist.png" class="playlist-cover-img">
                             <div class="playlist-cover-overlay">

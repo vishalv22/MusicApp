@@ -42,6 +42,26 @@ class MusicPlayer {
         this.spotdlServerRunning = false;
         this.videoInMainPanel = false;
         this.mainPanelVideo = null;
+        this.downloadResults = [];
+        this.downloadLogs = [];
+        this.downloadInProgress = false;
+        this.downloadProcessId = null;
+        this.downloadSettings = {};
+        this.downloadPanelInitialized = false;
+        this.downloadIpcBound = false;
+        this.downloadSearchType = 'track';
+        this.downloadQueueItems = [];
+        this.pendingDownloadQueue = [];
+        this.activeDownloadJob = null;
+        this.downloadJobCounter = 0;
+        this.dabLoggedIn = false;
+        this.dabUserName = '';
+        this.librarySearchValue = '';
+        this.defaultSearchPlaceholder = '';
+        this.downloadLastQuery = '';
+        this.downloadLastCount = 0;
+        this.previewMode = false;
+        this.previewTrack = null;
         
         // Audio context for equalizer
         this.audioContext = null;
@@ -79,6 +99,7 @@ class MusicPlayer {
 
         
         this.initElements();
+        this.defaultSearchPlaceholder = this.searchInput?.placeholder || 'Search here...';
         this.bindEvents();
         this.initMediaSession();
         this.initVisualizer();
@@ -226,7 +247,31 @@ class MusicPlayer {
             musicFileInput: 'musicFileInput',
             videoFileInput: 'videoFileInput',
             lyricsFileInput: 'lyricsFileInput',
-            resizer: 'resizer'
+            resizer: 'resizer',
+
+            downloadMusicBtn: 'downloadMusicBtn',
+            downloadPanel: 'downloadPanel',
+            downloadCloseBtn: 'downloadCloseBtn',
+            downloadResultsEl: 'downloadResults',
+            downloadResultsStatus: 'downloadResultsStatus',
+            downloadSearchTabs: 'downloadSearchTabs',
+            downloadSubtitle: 'downloadSubtitle',
+            downloadUserBadge: 'downloadUserBadge',
+            downloadUserName: 'downloadUserName',
+            downloadLoggedInActions: 'downloadLoggedInActions',
+            downloadAuthCard: 'downloadAuthCard',
+            downloadAuthFields: 'downloadAuthFields',
+            downloadPostLogin: 'downloadPostLogin',
+            dabEmailInput: 'dabEmailInput',
+            dabPasswordInput: 'dabPasswordInput',
+            dabLoginBtn: 'dabLoginBtn',
+            dabLogoutBtn: 'dabLogoutBtn',
+            dabStatusEl: 'dabStatus',
+            downloadLogsToggleBtn: 'downloadLogsToggleBtn',
+            downloadLogsPanel: 'downloadLogsPanel',
+            downloadClearLogsBtn: 'downloadClearLogsBtn',
+            downloadStatusEl: 'downloadStatus',
+            downloadLogsEl: 'downloadLogs'
         };
         
         Object.keys(elements).forEach(key => {
@@ -606,6 +651,7 @@ class MusicPlayer {
         this.setupSortMenu();
         this.setupSelectionUi();
         this.setupPlaylists();
+        this.setupDownloadPanel();
         this.setupVisibilityHandler();
         this.setupPlayerBarSizing();
         this.setupScrollbarTimeout();
@@ -792,6 +838,12 @@ class MusicPlayer {
         if (index < 0 || index >= this.songs.length) {
             console.error('Invalid song index:', index);
             return;
+        }
+        if (this.previewMode) {
+            this.previewMode = false;
+            this.previewTrack = null;
+            this.updatePreviewBar();
+            this.setPreviewOptionState(false);
         }
         this.currentSongIndex = index;
         const song = this.songs[index];
@@ -1043,7 +1095,44 @@ class MusicPlayer {
         this.nextBtn.disabled = false;
     }
 
+    setPreviewOptionState(isPreview) {
+        const controls = [
+            this.lyricsToggleBtn,
+            this.lyricsFontBtn,
+            this.offsetToggleBtn,
+            this.videoBtn,
+            this.visualizerBtn,
+            this.floatLyricsBtn
+        ];
+
+        controls.forEach(control => {
+            if (!control) return;
+            control.disabled = isPreview;
+            control.classList.toggle('disabled', isPreview);
+            if (isPreview) {
+                control.style.opacity = '0.4';
+            } else {
+                control.style.opacity = '';
+            }
+        });
+
+        if (isPreview) {
+            if (this.lyricsFontControls) this.lyricsFontControls.style.display = 'none';
+            if (this.lyricsFontBtn) this.lyricsFontBtn.classList.remove('active');
+            if (this.lyricsTimingControls) this.lyricsTimingControls.style.display = 'none';
+            if (this.offsetToggleBtn) this.offsetToggleBtn.classList.remove('active');
+        }
+    }
+
     togglePlayPause() {
+        if (this.previewMode) {
+            if (this.isPlaying) {
+                this.pause();
+            } else {
+                this.play();
+            }
+            return;
+        }
         if (this.currentSongIndex === -1) return;
         
         if (this.isPlaying) {
@@ -1159,6 +1248,10 @@ class MusicPlayer {
     }
     
     playPrevious(manual = false) {
+        if (this.previewMode) {
+            this.stopPreviewPlayback();
+            return;
+        }
         if (this.shuffleMode) {
             const prevIndex = this.getPreviousShuffleSong();
             this.selectSong(prevIndex);
@@ -1171,6 +1264,10 @@ class MusicPlayer {
     }
 
     playNext(manual = false) {
+        if (this.previewMode) {
+            this.stopPreviewPlayback();
+            return;
+        }
         // Skip repeat one logic if manually clicked
         if (this.repeatMode === 'one' && !manual) {
             if (this.isVideoMode) {
@@ -1228,13 +1325,15 @@ class MusicPlayer {
             }
         }
         
-        // Save current time with throttling
-        this.settings.lastCurrentTime = currentTime;
-        if (!this.saveSettingsTimeout) {
-            this.saveSettingsTimeout = setTimeout(() => {
-                this.saveSettings();
-                this.saveSettingsTimeout = null;
-            }, 1000);
+        // Save current time with throttling (skip previews)
+        if (!this.previewMode) {
+            this.settings.lastCurrentTime = currentTime;
+            if (!this.saveSettingsTimeout) {
+                this.saveSettingsTimeout = setTimeout(() => {
+                    this.saveSettings();
+                    this.saveSettingsTimeout = null;
+                }, 1000);
+            }
         }
         
         this.updateProgress();
@@ -1243,8 +1342,16 @@ class MusicPlayer {
     }
 
     updateDuration() {
-        const currentSong = this.songs[this.currentSongIndex];
         const duration = this.isVideoMode ? this.videoElement.duration : this.audio.duration;
+        if (this.previewMode && this.previewTrack) {
+            const fallback = this.previewTrack.duration || 0;
+            const display = Number.isFinite(duration) && duration > 0 ? duration : fallback;
+            this.detailDuration.textContent = this.formatDuration(display);
+            return;
+        }
+
+        const currentSong = this.songs[this.currentSongIndex];
+        if (!currentSong) return;
         const minutes = Math.floor(duration / 60);
         const seconds = Math.floor(duration % 60);
         this.detailDuration.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
@@ -2520,6 +2627,10 @@ class MusicPlayer {
             }
             
             const query = e.target.value.trim();
+
+            if (this.currentView === 'download') {
+                return;
+            }
             
             // Immediate search for short queries or clearing
             if (query.length <= 2) {
@@ -2535,9 +2646,19 @@ class MusicPlayer {
         
         // Clear search on Escape key
         this.searchInput.onkeydown = (e) => {
+            if (e.key === 'Enter' && this.currentView === 'download') {
+                e.preventDefault();
+                this.performDownloadSearch();
+                return;
+            }
             if (e.key === 'Escape') {
                 this.searchInput.value = '';
-                this.filterSongs('');
+                if (this.currentView === 'download') {
+                    this.downloadResults = [];
+                    this.renderDownloadResults();
+                } else {
+                    this.filterSongs('');
+                }
             }
         };
     }
@@ -2953,6 +3074,10 @@ class MusicPlayer {
     }
 
     updateMediaAvailabilityButtons(song) {
+        if (this.previewMode) {
+            this.setPreviewOptionState(true);
+            return;
+        }
         const currentSong = song || (this.currentSongIndex >= 0 ? this.songs[this.currentSongIndex] : null);
         const hasLyrics = !!currentSong && !!currentSong.hasLyrics && !currentSong.isVideo;
         const hasVideo = !!currentSong && (!!currentSong.isVideo || !!currentSong.attachedVideo || !!currentSong.youtubeVideo);
@@ -3194,6 +3319,13 @@ class MusicPlayer {
     }
     
     updateSongDetails(song) {
+        if (song?.isPreview) {
+            this.detailTitle.textContent = `${song.title || 'Unknown Title'} (Preview)`;
+            this.detailArtist.textContent = song.artist || 'Unknown Artist';
+            this.detailFormat.textContent = song.formatLabel || 'STREAM';
+            return;
+        }
+
         if (this.isVideoMode && (song.isVideo || song.attachedVideo)) {
             // Show video details
             this.detailTitle.textContent = song.title + ' (Video)';
@@ -3207,7 +3339,11 @@ class MusicPlayer {
             // Show music details
             this.detailTitle.textContent = song.title;
             this.detailArtist.textContent = song.artist;
-            this.detailFormat.textContent = song.name.split('.').pop().toUpperCase();
+            if (song?.name && song.name.includes('.')) {
+                this.detailFormat.textContent = song.name.split('.').pop().toUpperCase();
+            } else {
+                this.detailFormat.textContent = song.formatLabel || '--';
+            }
         }
     }
 
@@ -3230,11 +3366,19 @@ class MusicPlayer {
         };
 
         setHandler('play', () => {
+            if (this.previewMode) {
+                this.play();
+                return;
+            }
             if (this.currentSongIndex < 0) return;
             if (this.isVideoMode) this.playVideo();
             else this.play();
         });
         setHandler('pause', () => {
+            if (this.previewMode) {
+                this.pause();
+                return;
+            }
             if (this.isVideoMode) this.pauseVideo();
             else this.pause();
         });
@@ -3244,6 +3388,10 @@ class MusicPlayer {
 
     syncMediaSessionPlaybackState() {
         if (!this.mediaSessionEnabled) return;
+        if (this.previewMode && this.previewTrack) {
+            navigator.mediaSession.playbackState = this.isPlaying ? 'playing' : 'paused';
+            return;
+        }
         if (this.currentSongIndex < 0) {
             this.clearMediaSessionMetadata();
             navigator.mediaSession.playbackState = 'none';
@@ -3493,7 +3641,7 @@ class MusicPlayer {
         if (viewStorageFolderBtn) viewStorageFolderBtn.onclick = () => this.viewStorageFolder();
         document.getElementById('addMusicFilesBtn').onclick = () => this.addMusicFolders();
         document.getElementById('downloadMusicBtn').onclick = () => {
-            this.showNotification('Download feature removed', 'info');
+            this.toggleDownloadPanel();
         };
         
         // Auto-hide dropdown on mouse leave
@@ -3517,6 +3665,700 @@ class MusicPlayer {
                 document.getElementById('categoryDropdown').style.display = 'none';
             }
         });
+    }
+
+    setupDownloadPanel() {
+        if (this.downloadPanelInitialized || !this.downloadPanel) return;
+        this.downloadPanelInitialized = true;
+
+        if (this.downloadCloseBtn) {
+            this.downloadCloseBtn.onclick = () => this.showMusicView();
+        }
+        if (this.downloadSearchTabs) {
+            this.downloadSearchTabs.onclick = (e) => {
+                const tab = e.target.closest('.download-tab');
+                if (!tab) return;
+                const type = tab.dataset.type;
+                if (!type) return;
+                this.setDownloadSearchType(type);
+            };
+        }
+        if (this.dabLoginBtn) this.dabLoginBtn.onclick = () => this.handleDabLogin();
+        if (this.dabLogoutBtn) this.dabLogoutBtn.onclick = () => this.handleDabLogout();
+        if (this.downloadLogsToggleBtn) this.downloadLogsToggleBtn.onclick = () => this.toggleDownloadLogs();
+        if (this.downloadClearLogsBtn) this.downloadClearLogsBtn.onclick = () => this.clearDownloadLogs();
+
+        if (this.downloadResultsEl) {
+            this.downloadResultsEl.onclick = (e) => this.handleDownloadResultClick(e);
+        }
+
+        if (!this.downloadIpcBound) {
+            ipcRenderer.on('dab-log', (event, payload) => this.handleDabLog(payload));
+            ipcRenderer.on('dab-exit', (event, payload) => this.handleDabExit(payload));
+            this.downloadIpcBound = true;
+        }
+
+        this.refreshDownloadSettings();
+    }
+
+    toggleDownloadPanel() {
+        if (!this.downloadPanel) return;
+        const isVisible = window.getComputedStyle(this.downloadPanel).display !== 'none';
+        if (isVisible) {
+            this.showMusicView();
+            return;
+        }
+
+        if (this.selectionMode) this.disableSelectionMode();
+        this.hideAllPanels();
+        this.downloadPanel.style.display = 'flex';
+        this.leftPanel.classList.add('download-active');
+        this.leftPanel.classList.remove('settings-active');
+        document.body.classList.remove('settings-open');
+        document.body.classList.add('download-open');
+        if (this.downloadMusicBtn) this.downloadMusicBtn.classList.add('active');
+        this.currentView = 'download';
+        if (this.searchInput) {
+            this.librarySearchValue = this.searchInput.value;
+            this.searchInput.value = '';
+            this.searchInput.placeholder = this.dabLoggedIn ? 'Search online catalog...' : 'Log in to search the catalog';
+        }
+        if (this.downloadLogsPanel) this.downloadLogsPanel.style.display = this.dabLoggedIn ? 'flex' : 'none';
+        if (this.downloadLogsToggleBtn) this.downloadLogsToggleBtn.textContent = this.dabLoggedIn ? 'Hide Logs' : 'Logs';
+        this.refreshDownloadSettings();
+        this.renderDownloadResults();
+    }
+
+    setDownloadSearchType(type) {
+        if (!type) return;
+        this.downloadSearchType = type;
+        if (this.downloadSearchTabs) {
+            this.downloadSearchTabs.querySelectorAll('.download-tab').forEach(tab => {
+                tab.classList.toggle('active', tab.dataset.type === type);
+            });
+        }
+    }
+
+    async refreshDownloadSettings() {
+        try {
+            const settings = await ipcRenderer.invoke('dab-get-settings');
+            this.downloadSettings = settings || {};
+            this.dabLoggedIn = !!settings?.loggedIn;
+            if (!this.dabUserName) {
+                this.dabUserName = this.getSavedDabUserName();
+            }
+            this.setDabStatus(this.dabLoggedIn ? 'Logged in' : 'Not logged in', this.dabLoggedIn);
+            this.updateAuthUI();
+            if (!this.dabLoggedIn) {
+                this.setDownloadResultsStatus('Please log in to search the catalog.');
+            } else if (!this.searchInput?.value?.trim()) {
+                this.setDownloadResultsStatus('Use the top search bar and press Enter.');
+            }
+        } catch (error) {
+            console.error('Failed to load DAB settings:', error);
+        }
+    }
+
+    setDabStatus(message, ok = false) {
+        if (!this.dabStatusEl) return;
+        this.dabStatusEl.textContent = message;
+        this.dabStatusEl.style.color = ok ? '#3ddc97' : '';
+    }
+
+    setDownloadResultsStatus(message, options = {}) {
+        if (!this.downloadResultsStatus) return;
+        if (options.html) {
+            this.downloadResultsStatus.innerHTML = message;
+        } else {
+            this.downloadResultsStatus.textContent = message;
+        }
+    }
+
+    getDownloadTypeLabel(type) {
+        switch (type) {
+            case 'album':
+                return 'Albums';
+            case 'artist':
+                return 'Artists';
+            default:
+                return 'Tracks';
+        }
+    }
+
+    getSavedDabUserName() {
+        try {
+            return localStorage.getItem('vimusic-dab-user') || '';
+        } catch {
+            return '';
+        }
+    }
+
+    setLoggedInUser(email) {
+        this.dabUserName = email || '';
+        try {
+            if (email) {
+                localStorage.setItem('vimusic-dab-user', email);
+            } else {
+                localStorage.removeItem('vimusic-dab-user');
+            }
+        } catch {}
+        this.updateAuthUI();
+    }
+
+    updateAuthUI() {
+        const loggedIn = this.dabLoggedIn;
+        const displayName = this.dabUserName || 'Account';
+
+        if (this.downloadPanel) {
+            this.downloadPanel.classList.toggle('download-logged-out', !loggedIn);
+            this.downloadPanel.classList.toggle('download-logged-in-minimal', loggedIn);
+        }
+        if (document.body) {
+            document.body.classList.toggle('download-minimal', loggedIn && this.currentView === 'download');
+        }
+        if (this.downloadLoggedInActions) {
+            this.downloadLoggedInActions.style.display = loggedIn ? 'flex' : 'none';
+        }
+        if (this.downloadUserBadge) {
+            this.downloadUserBadge.style.display = loggedIn ? 'inline-flex' : 'none';
+        }
+        if (this.downloadUserName) {
+            this.downloadUserName.textContent = displayName;
+        }
+        if (this.downloadAuthCard) {
+            this.downloadAuthCard.style.display = loggedIn ? 'none' : 'flex';
+        }
+        if (this.downloadAuthFields) {
+            this.downloadAuthFields.style.display = loggedIn ? 'none' : 'flex';
+        }
+        if (this.downloadPostLogin) {
+            this.downloadPostLogin.style.display = loggedIn ? 'flex' : 'none';
+        }
+        if (this.dabLogoutBtn) {
+            this.dabLogoutBtn.style.display = loggedIn ? 'inline-flex' : 'none';
+        }
+        if (loggedIn && this.currentView === 'download') {
+            if (this.downloadLogsPanel) this.downloadLogsPanel.style.display = 'flex';
+            if (this.downloadLogsToggleBtn) this.downloadLogsToggleBtn.textContent = 'Hide Logs';
+        } else if (!loggedIn) {
+            if (this.downloadLogsPanel) this.downloadLogsPanel.style.display = 'none';
+            if (this.downloadLogsToggleBtn) this.downloadLogsToggleBtn.textContent = 'Logs';
+        }
+    }
+
+    setDownloadStatus(message) {
+        if (this.downloadStatusEl) this.downloadStatusEl.textContent = message;
+    }
+
+    async handleDabLogin() {
+        const email = this.dabEmailInput?.value?.trim();
+        const password = this.dabPasswordInput?.value ?? '';
+
+        if (!email || !password) {
+            this.showNotification('Enter email and password', 'error');
+            return;
+        }
+
+        this.setDabStatus('Logging in...');
+        const result = await ipcRenderer.invoke('dab-login', { email, password });
+        if (result?.ok) {
+            this.showNotification('Login successful', 'success');
+            if (this.dabPasswordInput) this.dabPasswordInput.value = '';
+            this.dabLoggedIn = true;
+            this.setLoggedInUser(email);
+            await this.refreshDownloadSettings();
+            if (this.searchInput && this.currentView === 'download') {
+                this.searchInput.placeholder = 'Search online catalog...';
+            }
+        } else {
+            this.setDabStatus(result?.error || 'Login failed');
+            this.showNotification(result?.error || 'Login failed', 'error');
+        }
+    }
+
+    async handleDabLogout() {
+        await ipcRenderer.invoke('dab-logout');
+        this.showNotification('Logged out', 'info');
+        this.dabLoggedIn = false;
+        this.setLoggedInUser('');
+        await this.refreshDownloadSettings();
+        if (this.searchInput && this.currentView === 'download') {
+            this.searchInput.placeholder = 'Log in to search the catalog';
+        }
+    }
+
+    async performDownloadSearch() {
+        const query = this.searchInput?.value?.trim();
+        if (!query) {
+            this.showNotification('Enter a search term', 'info');
+            return;
+        }
+        if (!this.dabLoggedIn) {
+            this.showNotification('Please login to search', 'info');
+            return;
+        }
+
+        this.setDownloadStatus('Searching...');
+        this.downloadLastQuery = query;
+        const typeLabel = this.getDownloadTypeLabel(this.downloadSearchType);
+        this.setDownloadResultsStatus(`Searching for: <span class="download-results-highlight">${typeLabel}</span>...`, { html: true });
+        this.downloadResults = [];
+        this.renderDownloadResults();
+
+        const result = await ipcRenderer.invoke('dab-search', { query, type: this.downloadSearchType });
+        if (!result?.ok) {
+            this.setDownloadStatus(result?.error || 'Search failed');
+            this.showNotification(result?.error || 'Search failed', 'error');
+            this.setDownloadResultsStatus(result?.error || 'Search failed.');
+            return;
+        }
+
+        this.downloadResults = Array.isArray(result.results) ? result.results : [];
+        const count = this.downloadResults.length;
+        this.downloadLastCount = count;
+        this.setDownloadStatus(count ? `Found ${count} result${count === 1 ? '' : 's'}` : 'No results');
+        const noun = typeLabel.toLowerCase();
+        const countLabel = `(${count} unique ${noun}${count === 1 ? '' : 's'} loaded)`;
+        this.setDownloadResultsStatus(`Searching for: <span class="download-results-highlight">${typeLabel}</span> ${countLabel}`, { html: true });
+        this.renderDownloadResults();
+    }
+
+    renderDownloadResults() {
+        if (!this.downloadResultsEl) return;
+        const results = Array.isArray(this.downloadResults) ? this.downloadResults : [];
+
+        if (!results.length) {
+            this.downloadResultsEl.innerHTML = `
+                <div class="download-empty">${this.dabLoggedIn ? 'Use the top search bar to find tracks, albums, or artists.' : 'Log in to search the catalog.'}</div>
+            `;
+            return;
+        }
+
+        const previewId = this.previewTrack?.id;
+        this.downloadResultsEl.innerHTML = results.map((track, index) => {
+            const kind = track.kind || 'track';
+            const cover = track.coverUrl
+                ? `<img src="${track.coverUrl}" alt="">`
+                : `<div class="cover-placeholder">🎵</div>`;
+            const isPreviewing = previewId !== undefined && previewId !== null && track.id === previewId;
+            let title = track.title || track.name || 'Unknown';
+            let artistLine = '';
+            let metaHtml = '';
+            let actions = '';
+
+            if (kind === 'track') {
+                const artist = track.artist || 'Unknown Artist';
+                artistLine = `
+                    <div class="download-result-artist">
+                        <img src="icons/user.svg" alt="">
+                        <span>${this.escapeHtml(artist)}</span>
+                    </div>
+                `;
+                const meta = [];
+                if (track.genre) meta.push(this.escapeHtml(track.genre));
+                if (track.releaseDate) meta.push(this.escapeHtml(this.formatReleaseDate(track.releaseDate)));
+                if (track.duration) meta.push(this.formatDuration(track.duration));
+                const quality = this.formatQuality(track);
+                if (quality) meta.push(this.escapeHtml(quality));
+                metaHtml = meta.length
+                    ? `<div class="download-result-meta-row">${meta.map(item => `<span class="download-meta-pill">${item}</span>`).join('')}</div>`
+                    : '';
+                const previewLabel = isPreviewing ? 'Stop' : 'Play';
+                actions = `
+                    <button class="download-action-btn" data-action="play">${previewLabel}</button>
+                    <button class="download-action-btn primary" data-action="download-track" ${this.downloadInProgress ? 'disabled' : ''}>Download</button>
+                `;
+            } else if (kind === 'album') {
+                const artist = track.artist || 'Unknown Artist';
+                artistLine = `<div class="download-result-sub">${this.escapeHtml(artist)}</div>`;
+                const meta = [];
+                if (track.year) meta.push(this.escapeHtml(track.year));
+                if (track.totalTracks) meta.push(`${track.totalTracks} tracks`);
+                metaHtml = meta.length
+                    ? `<div class="download-result-meta-row">${meta.map(item => `<span class="download-meta-pill">${item}</span>`).join('')}</div>`
+                    : '';
+                actions = `<button class="download-action-btn primary" data-action="download-album" ${this.downloadInProgress ? 'disabled' : ''}>Download</button>`;
+            } else if (kind === 'artist') {
+                artistLine = `<div class="download-result-sub">Artist</div>`;
+                metaHtml = '';
+                actions = `<button class="download-action-btn primary" data-action="download-artist" ${this.downloadInProgress ? 'disabled' : ''}>Download</button>`;
+                title = track.name || track.title || 'Unknown Artist';
+            }
+
+            return `
+                <div class="download-result ${isPreviewing ? 'is-previewing' : ''}" data-index="${index}">
+                    <div class="download-result-cover">${cover}</div>
+                    <div class="download-result-meta">
+                        <div class="download-result-title">${this.escapeHtml(title)}</div>
+                        ${artistLine}
+                        ${metaHtml}
+                    </div>
+                    <div class="download-result-actions">${actions}</div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    handleDownloadResultClick(event) {
+        const actionBtn = event.target.closest('button[data-action]');
+        if (!actionBtn) return;
+        const row = event.target.closest('.download-result');
+        if (!row) return;
+        const index = Number(row.dataset.index);
+        if (!Number.isInteger(index)) return;
+        const track = this.downloadResults?.[index];
+        if (!track) return;
+
+        const action = actionBtn.dataset.action;
+        if (action === 'play') {
+            this.previewDownloadTrack(track);
+        } else if (action === 'download-track') {
+            this.queueDownloadItem(track, 'track');
+        } else if (action === 'download-album') {
+            const albumItem = track.kind === 'album' ? track : {
+                ...track,
+                kind: 'album',
+                id: track.albumId || track.id,
+                title: track.album || track.title,
+                artist: track.artist
+            };
+            this.queueDownloadItem(albumItem, 'album');
+        } else if (action === 'download-artist') {
+            const artistItem = track.kind === 'artist' ? track : {
+                ...track,
+                kind: 'artist',
+                id: track.artistId || track.id,
+                name: track.artist || track.name
+            };
+            this.queueDownloadItem(artistItem, 'artist');
+        }
+    }
+
+    async previewDownloadTrack(track) {
+        if (!track?.id) {
+            this.showNotification('Preview not available', 'error');
+            return;
+        }
+        if (!this.dabLoggedIn) {
+            this.showNotification('Please login to preview', 'info');
+            return;
+        }
+
+        if (this.previewMode && this.previewTrack?.id === track.id) {
+            this.stopPreviewPlayback();
+            return;
+        }
+
+        this.setDownloadStatus('Loading preview...');
+        const result = await ipcRenderer.invoke('dab-stream-url', { trackId: track.id });
+        if (!result?.ok || !result.url) {
+            this.showNotification(result?.error || 'Preview failed', 'error');
+            this.setDownloadStatus(result?.error || 'Preview failed');
+            return;
+        }
+
+        this.startPreviewPlayback({
+            ...track,
+            streamUrl: result.url,
+            isPreview: true,
+            formatLabel: 'STREAM'
+        });
+        this.setDownloadStatus(`Previewing "${track.title}"`);
+        this.renderDownloadResults();
+    }
+
+    queueDownloadItem(item, kind) {
+        if (!item) return;
+        const title = item.title || item.name || 'Unknown';
+        const artist = item.artist || item.name || 'Unknown';
+        const job = {
+            id: ++this.downloadJobCounter,
+            kind,
+            item,
+            title,
+            artist,
+            status: this.downloadInProgress ? 'queued' : 'running',
+            createdAt: Date.now()
+        };
+
+        this.downloadQueueItems.push(job);
+
+        if (this.downloadInProgress) {
+            this.pendingDownloadQueue.push(job);
+            this.showNotification(`Added "${title}" to queue`, 'info');
+            this.renderDownloadQueue();
+            return;
+        }
+
+        this.startDownloadJob(job);
+    }
+
+    async startDownloadJob(job) {
+        if (!job) return;
+        if (!this.dabLoggedIn) {
+            this.showNotification('Please login to download', 'info');
+            return;
+        }
+        this.downloadInProgress = true;
+        this.activeDownloadJob = job;
+        this.downloadProcessId = null;
+        job.status = 'running';
+        this.renderDownloadQueue();
+        this.clearDownloadLogs();
+
+        const settings = await ipcRenderer.invoke('dab-get-settings');
+        const downloadPath = settings?.downloadPath;
+        if (downloadPath) {
+            await ipcRenderer.invoke('add-music-folders', [downloadPath]);
+        }
+
+        this.setDownloadStatus(`Downloading "${job.title}"`);
+        this.renderDownloadResults();
+
+        const result = await ipcRenderer.invoke('dab-download-track', {
+            kind: job.kind,
+            track: job.item,
+            apiUrl: settings?.apiUrl,
+            downloadPath
+        });
+
+        if (!result?.ok) {
+            job.status = 'error';
+            job.error = result?.error || 'Download failed to start';
+            this.downloadInProgress = false;
+            this.activeDownloadJob = null;
+            this.setDownloadStatus(job.error);
+            this.showNotification(job.error, 'error');
+            this.renderDownloadQueue();
+            this.renderDownloadResults();
+            this.startNextQueuedDownload();
+            return;
+        }
+
+        this.downloadProcessId = result.id;
+    }
+
+    startNextQueuedDownload() {
+        if (this.downloadInProgress) return;
+        const next = this.pendingDownloadQueue.shift();
+        if (next) {
+            this.startDownloadJob(next);
+        }
+    }
+
+    handleDabLog(payload) {
+        if (!payload) return;
+        if (this.downloadProcessId && payload.id !== this.downloadProcessId) return;
+        const message = String(payload.message || '').replace(/\r/g, '\n');
+        const lines = message.split('\n').filter(line => line.trim().length);
+        lines.forEach(line => this.appendDownloadLog(line));
+    }
+
+    handleDabExit(payload) {
+        if (!payload) return;
+        if (this.downloadProcessId && payload.id !== this.downloadProcessId) return;
+
+        this.downloadInProgress = false;
+        this.downloadProcessId = null;
+        const success = payload.code === 0;
+        const job = this.activeDownloadJob;
+        if (job) {
+            job.status = success ? 'done' : 'error';
+            if (!success) job.error = job.error || 'Download failed';
+        }
+        this.activeDownloadJob = null;
+        this.setDownloadStatus(success ? 'Download complete' : 'Download failed');
+        this.showNotification(success ? 'Download complete' : 'Download failed', success ? 'success' : 'error');
+        this.renderDownloadQueue();
+        this.renderDownloadResults();
+
+        if (success) {
+            setTimeout(() => this.loadMusic(), 1000);
+        }
+        this.startNextQueuedDownload();
+    }
+
+    appendDownloadLog(line) {
+        if (!line || !this.downloadLogsEl) return;
+        this.downloadLogs.push(line);
+        if (this.downloadLogs.length > 200) {
+            this.downloadLogs.shift();
+        }
+        this.downloadLogsEl.textContent = this.downloadLogs.join('\n');
+        this.downloadLogsEl.scrollTop = this.downloadLogsEl.scrollHeight;
+    }
+
+    clearDownloadLogs() {
+        this.downloadLogs = [];
+        if (this.downloadLogsEl) this.downloadLogsEl.textContent = '';
+    }
+
+    toggleDownloadLogs() {
+        if (!this.downloadLogsPanel || !this.downloadLogsToggleBtn) return;
+        const isVisible = window.getComputedStyle(this.downloadLogsPanel).display !== 'none';
+        this.downloadLogsPanel.style.display = isVisible ? 'none' : 'flex';
+        this.downloadLogsToggleBtn.textContent = isVisible ? 'Logs' : 'Hide Logs';
+        if (!isVisible && this.downloadLogsEl) {
+            this.downloadLogsEl.scrollTop = this.downloadLogsEl.scrollHeight;
+        }
+    }
+
+    renderDownloadQueue() {
+        if (!this.downloadQueueEl) return;
+        const items = Array.isArray(this.downloadQueueItems) ? this.downloadQueueItems : [];
+        if (!items.length) {
+            this.downloadQueueEl.innerHTML = `<div class="download-empty">No downloads yet.</div>`;
+            return;
+        }
+
+        this.downloadQueueEl.innerHTML = items.map(item => {
+            const statusLabel = item.status === 'running'
+                ? 'Running'
+                : item.status === 'queued'
+                  ? 'Queued'
+                  : item.status === 'done'
+                    ? 'Done'
+                    : 'Error';
+            const subtitle = item.kind === 'artist'
+                ? 'Artist'
+                : item.kind === 'album'
+                  ? (item.artist || 'Album')
+                  : (item.artist || 'Track');
+            return `
+                <div class="download-queue-item" data-status="${item.status}">
+                    <div class="download-queue-meta">
+                        <div class="download-queue-title">${this.escapeHtml(item.title)}</div>
+                        <div class="download-queue-sub">${this.escapeHtml(subtitle)}</div>
+                    </div>
+                    <div class="download-queue-status">${statusLabel}</div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    clearFinishedDownloads() {
+        this.downloadQueueItems = this.downloadQueueItems.filter(item => item.status === 'running' || item.status === 'queued');
+        this.pendingDownloadQueue = this.pendingDownloadQueue.filter(item => item.status === 'queued');
+        this.renderDownloadQueue();
+    }
+
+    startPreviewPlayback(track) {
+        if (!track?.streamUrl) return;
+        this.previewMode = true;
+        this.previewTrack = track;
+        this.setPreviewOptionState(true);
+
+        if (this.isVideoMode) {
+            this.pauseVideo();
+        } else {
+            this.pause();
+        }
+
+        this.hideVideoPlayer();
+        this.videoElement.pause();
+        this.videoElement.src = '';
+
+        this.audio.src = track.streamUrl;
+        this.audio.preload = 'auto';
+        this.audio.muted = false;
+
+        this.detailTitle.textContent = `${track.title || 'Unknown Title'} (Preview)`;
+        this.detailArtist.textContent = track.artist || 'Unknown Artist';
+        this.detailFormat.textContent = track.formatLabel || 'STREAM';
+        if (track.duration) {
+            this.detailDuration.textContent = this.formatDuration(track.duration);
+        }
+
+        if (this.currentImageUrl) {
+            URL.revokeObjectURL(this.currentImageUrl);
+            this.currentImageUrl = null;
+        }
+
+        const coverContainer = this.albumCoverMedia || this.albumCover;
+        if (track.coverUrl) {
+            coverContainer.innerHTML = '';
+            this.albumCover.style.display = 'flex';
+            const img = document.createElement('img');
+            img.src = track.coverUrl;
+            img.alt = 'Album Cover';
+            coverContainer.appendChild(img);
+            this.updateVisualizerColorFromImageUrl(track.coverUrl);
+        } else {
+            coverContainer.innerHTML = '<div class="cover-placeholder">🎵</div>';
+        }
+
+        this.lyrics = [];
+        this.lyricsDiv.innerHTML = `
+            <div class="no-lyrics-container">
+                <p class="no-lyrics">Preview mode</p>
+                <div class="lyrics-instructions">
+                    <ul class="instruction-list">
+                        <li>Lyrics are not available for previews</li>
+                        <li>Download the track to add synced lyrics</li>
+                    </ul>
+                </div>
+            </div>
+        `;
+
+        void this.updateMediaSessionForSong(track);
+        this.enableControls();
+        this.updatePreviewBar();
+        this.play();
+    }
+
+    stopPreviewPlayback() {
+        if (!this.previewMode) return;
+        this.previewMode = false;
+        this.previewTrack = null;
+        this.pause();
+        this.setDownloadStatus('Preview stopped');
+        this.updatePreviewBar();
+        this.renderDownloadResults();
+        this.setPreviewOptionState(false);
+        this.updateMediaAvailabilityButtons();
+        this.updateTimingControls();
+        this.updateVisualizerAvailability();
+    }
+
+    updatePreviewBar() {
+        if (!this.downloadPreviewBar || !this.downloadPreviewTitle) return;
+        if (this.previewMode && this.previewTrack) {
+            this.downloadPreviewTitle.textContent = `Previewing: ${this.previewTrack.title || 'Unknown Title'}`;
+            this.downloadPreviewBar.style.display = 'flex';
+        } else {
+            this.downloadPreviewBar.style.display = 'none';
+        }
+    }
+
+    formatDuration(seconds) {
+        const value = Number(seconds);
+        if (!Number.isFinite(value) || value <= 0) return '--:--';
+        const minutes = Math.floor(value / 60);
+        const remainingSeconds = Math.floor(value % 60);
+        return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+    }
+
+    formatReleaseDate(value) {
+        if (!value) return '';
+        const text = String(value).trim();
+        if (!text) return '';
+        if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+        if (/^\d{4}$/.test(text)) return text;
+        const parsed = new Date(text);
+        if (Number.isNaN(parsed.getTime())) return text;
+        const year = parsed.getFullYear();
+        const month = String(parsed.getMonth() + 1).padStart(2, '0');
+        const day = String(parsed.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    }
+
+    formatQuality(track) {
+        const bitDepth = Number(track?.bitDepth);
+        const sampleRate = Number(track?.sampleRate);
+        if (!Number.isFinite(bitDepth) || !Number.isFinite(sampleRate)) return '';
+        if (bitDepth <= 0 || sampleRate <= 0) return '';
+        const rateKhz = sampleRate >= 1000 ? (sampleRate / 1000).toFixed(1) : sampleRate.toFixed(1);
+        return `${bitDepth}bit / ${rateKhz}kHz`;
     }
     
     setupPlaylistNameEdit(playlistName) {
@@ -4234,7 +5076,11 @@ class MusicPlayer {
         this.disableVisualizerView(false);
         document.getElementById('musicContainer').style.display = 'none';
         document.getElementById('settingsPanel').style.display = 'none';
+        if (this.downloadPanel) this.downloadPanel.style.display = 'none';
         this.hidePlaylistDetails();
+        document.body.classList.remove('download-open');
+        document.body.classList.remove('download-minimal');
+        if (this.downloadMusicBtn) this.downloadMusicBtn.classList.remove('active');
     }
     
 
@@ -4245,12 +5091,24 @@ class MusicPlayer {
         this.leftPanel.classList.remove('download-active');
         this.leftPanel.classList.remove('settings-active');
         document.body.classList.remove('settings-open');
+        document.body.classList.remove('download-open');
+        document.body.classList.remove('download-minimal');
+        if (this.downloadMusicBtn) this.downloadMusicBtn.classList.remove('active');
         this.currentView = 'music';
+        this.restoreLibrarySearchBar();
         
         // Move video back to default position if it was in main panel
         if (this.videoInMainPanel) {
             this.moveVideoBackToDefault();
         }
+    }
+
+    restoreLibrarySearchBar() {
+        if (!this.searchInput) return;
+        this.searchInput.placeholder = this.defaultSearchPlaceholder || 'Search here...';
+        const restoreValue = this.librarySearchValue || '';
+        this.searchInput.value = restoreValue;
+        this.filterSongs(restoreValue);
     }
     
     updateSelectionUI() {
@@ -5603,6 +6461,18 @@ class MusicPlayer {
             div.dataset.songIndex = `${originalIndex}`;
             div.dataset.displayIndex = `${i}`;
             if (this.selectedSongs.has(originalIndex)) div.classList.add('selected');
+            
+            const genreValue = Array.isArray(song.genre) ? song.genre[0] : song.genre;
+            const rawDate = song.releaseDate || song.year || song.date || song.dateAdded;
+            const dateValue = rawDate ? this.formatReleaseDate(rawDate) : '';
+            const durationValue = song.duration ? this.formatDuration(song.duration) : '';
+            const metaItems = [];
+            if (genreValue) metaItems.push(this.escapeHtml(genreValue));
+            if (dateValue) metaItems.push(this.escapeHtml(dateValue));
+            if (durationValue) metaItems.push(this.escapeHtml(durationValue));
+            const metaHtml = metaItems.length
+                ? `<span class="song-meta-sep">•</span>${metaItems.map(item => `<span class="song-meta-item">${item}</span>`).join('<span class="song-meta-sep">•</span>')}`
+                : '';
               
             // Defer image loading for faster initial render
             div.innerHTML = `
@@ -5618,7 +6488,10 @@ class MusicPlayer {
                 </div>
                 <div class="song-info-item">
                     <div class="song-name">${this.escapeHtml(song.title)}${this.getSongDetailDotHtml(song)}</div>
-                    <div class="song-artist">${this.escapeHtml(song.artist)}</div>
+                    <div class="song-meta-line">
+                        <span class="song-artist"><img src="icons/user.svg" alt="">${this.escapeHtml(song.artist)}</span>
+                        ${metaHtml}
+                    </div>
                 </div>
                 <div class="star-rating" data-song-index="${originalIndex}">
                     ${this.generateStars(song.rating || 0)}
@@ -7043,6 +7916,9 @@ class MusicPlayer {
             this.settingsBtn.classList.remove('active');
         } else {
             if (this.selectionMode) this.disableSelectionMode();
+            if (this.currentView === 'download') {
+                this.restoreLibrarySearchBar();
+            }
             this.hideAllPanels();
             this.settingsPanel.style.display = 'flex';
             this.settingsBtn.classList.add('active');

@@ -1,6 +1,9 @@
 const { app, BrowserWindow, ipcMain, dialog, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { spawn } = require('child_process');
+const http = require('http');
+const https = require('https');
 const mm = require('music-metadata');
 
 let mainWindow;
@@ -24,6 +27,141 @@ app.commandLine.appendSwitch('disable-frame-rate-limit');
 
 const APP_NAME = 'ViMusic';
 const APP_ID = 'com.vishal.vimusic';
+const DAB_DEFAULT_API_URL = 'https://dabmusic.xyz';
+
+let dabProcess = null;
+let dabProcessId = 0;
+
+const getDabDataDir = () => path.join(app.getPath('userData'), 'dab-downloader');
+const getDabConfigDir = () => path.join(getDabDataDir(), 'config');
+const getDabConfigPath = () => path.join(getDabConfigDir(), 'config.json');
+const getDabTokenPath = () => path.join(getDabConfigDir(), '.token');
+const getDefaultDabDownloadDir = () => path.join(app.getPath('music'), 'ViMusic');
+
+const ensureDirectory = (dirPath) => {
+    if (!fs.existsSync(dirPath)) {
+        fs.mkdirSync(dirPath, { recursive: true });
+    }
+};
+
+const readJsonFile = (filePath) => {
+    if (!fs.existsSync(filePath)) return null;
+    try {
+        return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    } catch (error) {
+        console.error('Failed to parse JSON:', filePath, error);
+        return null;
+    }
+};
+
+const writeJsonFile = (filePath, data) => {
+    ensureDirectory(path.dirname(filePath));
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+};
+
+const ensureDabConfig = (overrides = {}) => {
+    const configDir = getDabConfigDir();
+    ensureDirectory(configDir);
+
+    const existing = readJsonFile(getDabConfigPath()) || {};
+    const apiUrl = overrides.apiUrl || existing.APIURL || DAB_DEFAULT_API_URL;
+    const downloadLocation = getDefaultDabDownloadDir();
+
+    const config = {
+        ...existing,
+        APIURL: apiUrl,
+        DownloadLocation: downloadLocation
+    };
+
+    if (!config.Parallelism) config.Parallelism = 5;
+    if (!config.Format) config.Format = 'flac';
+    if (!config.Bitrate) config.Bitrate = '320';
+    if (!config.WarningBehavior) config.WarningBehavior = 'summary';
+    if (!config.naming) {
+        config.naming = {
+            album_folder_mask: '{artist}/{artist} - {album} ({year})',
+            ep_folder_mask: '{artist}/EPs/{artist} - {album} ({year})',
+            single_folder_mask: '{artist}/Singles/{artist} - {album} ({year})',
+            file_mask: '{track_number} - {artist} - {title}'
+        };
+    }
+
+    writeJsonFile(getDabConfigPath(), config);
+    return config;
+};
+
+const getDabToken = () => {
+    const tokenPath = getDabTokenPath();
+    if (!fs.existsSync(tokenPath)) return null;
+    try {
+        return fs.readFileSync(tokenPath, 'utf8').trim();
+    } catch (error) {
+        console.error('Failed to read DAB token:', error);
+        return null;
+    }
+};
+
+const deleteDabToken = () => {
+    const tokenPath = getDabTokenPath();
+    if (fs.existsSync(tokenPath)) {
+        try {
+            fs.unlinkSync(tokenPath);
+        } catch (error) {
+            console.error('Failed to delete DAB token:', error);
+        }
+    }
+};
+
+const resolveDabBinaryPath = () => {
+    const platform = process.platform;
+    const binaryName = platform === 'win32' ? 'dab-downloader.exe' : 'dab-downloader';
+    const packagedPath = path.join(process.resourcesPath, 'dab-downloader', 'bin', platform, binaryName);
+    const devPath = path.join(__dirname, 'dab-downloader', 'bin', platform, binaryName);
+
+    if (fs.existsSync(packagedPath)) return { path: packagedPath, found: true };
+    if (fs.existsSync(devPath)) return { path: devPath, found: true };
+    return { path: binaryName, found: false };
+};
+
+const requestJson = ({ url, method = 'GET', headers = {}, body }) => {
+    return new Promise((resolve, reject) => {
+        const target = new URL(url);
+        const client = target.protocol === 'https:' ? https : http;
+        const options = {
+            method,
+            hostname: target.hostname,
+            port: target.port || (target.protocol === 'https:' ? 443 : 80),
+            path: `${target.pathname}${target.search}`,
+            headers
+        };
+
+        const req = client.request(options, (res) => {
+            const chunks = [];
+            res.on('data', (chunk) => chunks.push(chunk));
+            res.on('end', () => {
+                const raw = Buffer.concat(chunks).toString('utf8');
+                let data = null;
+                if (raw) {
+                    try {
+                        data = JSON.parse(raw);
+                    } catch (error) {
+                        return resolve({ status: res.statusCode, headers: res.headers, data: raw });
+                    }
+                }
+                resolve({ status: res.statusCode, headers: res.headers, data });
+            });
+        });
+
+        req.on('error', reject);
+
+        if (body) {
+            const payload = typeof body === 'string' ? body : JSON.stringify(body);
+            req.write(payload);
+        }
+
+        req.end();
+    });
+};
 
 app.setName(APP_NAME);
 if (process.platform === 'win32') {
@@ -179,6 +317,308 @@ const getUserDataPath = () => {
     return path.join(app.getPath('userData'), 'storage');
 };
 
+const normalizeApiUrl = (value) => {
+    if (!value) return DAB_DEFAULT_API_URL;
+    let url = String(value).trim();
+    if (!/^https?:\/\//i.test(url)) {
+        url = `https://${url}`;
+    }
+    return url.replace(/\/+$/, '');
+};
+
+const normalizeCoverUrl = (apiUrl, coverUrl) => {
+    if (!coverUrl) return '';
+    if (coverUrl.startsWith('http://') || coverUrl.startsWith('https://')) return coverUrl;
+    if (coverUrl.startsWith('/')) return `${apiUrl}${coverUrl}`;
+    return coverUrl;
+};
+
+const sendDabEvent = (channel, payload) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(channel, payload);
+    }
+};
+
+ipcMain.handle('dab-get-settings', () => {
+    const config = ensureDabConfig();
+    const token = getDabToken();
+    return {
+        apiUrl: config.APIURL,
+        downloadPath: config.DownloadLocation,
+        loggedIn: Boolean(token)
+    };
+});
+
+ipcMain.handle('dab-set-settings', (event, settings) => {
+    const apiUrl = normalizeApiUrl(settings?.apiUrl);
+    const config = ensureDabConfig({ apiUrl });
+    return {
+        apiUrl: config.APIURL,
+        downloadPath: config.DownloadLocation
+    };
+});
+
+ipcMain.handle('dab-login', async (event, payload) => {
+    try {
+        const apiUrl = normalizeApiUrl(payload?.apiUrl);
+        const email = payload?.email?.trim();
+        const password = payload?.password ?? '';
+
+        if (!email || !password) {
+            return { ok: false, error: 'Email and password are required.' };
+        }
+
+        ensureDabConfig({ apiUrl });
+
+        const { status, headers, data } = await requestJson({
+            url: `${apiUrl}/api/auth/login`,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'User-Agent': 'ViMusic'
+            },
+            body: { email, password }
+        });
+
+        if (status === 401) {
+            return { ok: false, error: 'Invalid credentials.' };
+        }
+        if (status !== 200) {
+            return { ok: false, error: `Login failed (${status}).` };
+        }
+
+        const setCookie = headers['set-cookie'] || [];
+        const cookies = Array.isArray(setCookie) ? setCookie : [setCookie];
+        let token = '';
+        for (const cookie of cookies) {
+            if (typeof cookie !== 'string') continue;
+            const parts = cookie.split(';')[0].split('=');
+            if (parts[0] === 'session') {
+                token = parts.slice(1).join('=');
+                break;
+            }
+        }
+
+        if (!token) {
+            return { ok: false, error: 'Unable to read session token.' };
+        }
+
+        ensureDirectory(getDabConfigDir());
+        fs.writeFileSync(getDabTokenPath(), token);
+        return { ok: true };
+    } catch (error) {
+        console.error('DAB login failed:', error);
+        return { ok: false, error: 'Login failed.' };
+    }
+});
+
+ipcMain.handle('dab-logout', () => {
+    deleteDabToken();
+    return { ok: true };
+});
+
+ipcMain.handle('dab-search', async (event, payload) => {
+    try {
+        const config = ensureDabConfig({ apiUrl: payload?.apiUrl });
+        const apiUrl = normalizeApiUrl(config.APIURL);
+        const token = getDabToken();
+        if (!token) {
+            return { ok: false, error: 'Not logged in.' };
+        }
+
+        const query = payload?.query?.trim();
+        const limit = Number(payload?.limit) || 20;
+        const type = payload?.type || 'track';
+        if (!query) {
+            return { ok: false, error: 'Search query is required.' };
+        }
+
+        const searchUrl = `${apiUrl}/api/search?q=${encodeURIComponent(query)}&type=${encodeURIComponent(type)}&limit=${limit}`;
+        const { status, data } = await requestJson({
+            url: searchUrl,
+            headers: {
+                'User-Agent': 'ViMusic',
+                'Cookie': `session=${token}`
+            }
+        });
+
+        if (status === 401) {
+            return { ok: false, error: 'Session expired. Please log in again.' };
+        }
+        if (status !== 200) {
+            return { ok: false, error: `Search failed (${status}).` };
+        }
+
+        if (type === 'album') {
+            const albums = Array.isArray(data?.albums) ? data.albums : Array.isArray(data?.results) ? data.results : [];
+            const normalized = albums.map((album) => ({
+                kind: 'album',
+                id: album.id,
+                title: album.title || 'Unknown Album',
+                artist: album.artist || 'Unknown Artist',
+                year: album.year || (album.releaseDate ? String(album.releaseDate).slice(0, 4) : ''),
+                totalTracks: album.totalTracks || 0,
+                coverUrl: normalizeCoverUrl(apiUrl, album.cover || album.albumCover || '')
+            }));
+            return { ok: true, results: normalized };
+        }
+
+        if (type === 'artist') {
+            const artists = Array.isArray(data?.artists) ? data.artists : Array.isArray(data?.results) ? data.results : [];
+            const normalized = artists.map((artist) => ({
+                kind: 'artist',
+                id: artist.id,
+                name: artist.name || 'Unknown Artist',
+                artistId: artist.id,
+                coverUrl: normalizeCoverUrl(apiUrl, artist.picture || '')
+            }));
+            return { ok: true, results: normalized };
+        }
+
+        const tracks = Array.isArray(data?.tracks) ? data.tracks : Array.isArray(data?.results) ? data.results : [];
+        const normalized = tracks.map((track) => {
+            const albumTitle = track.album || track.albumTitle || '';
+            return {
+                kind: 'track',
+                id: track.id,
+                title: track.title || 'Unknown Title',
+                artist: track.artist || 'Unknown Artist',
+                album: albumTitle || 'Unknown Album',
+                duration: track.duration || 0,
+                albumId: track.albumId || '',
+                coverUrl: normalizeCoverUrl(apiUrl, track.albumCover || track.cover || ''),
+                isrc: track.isrc || track.ISRC || '',
+                genre: track.genre || '',
+                releaseDate: track.releaseDate || track.year || '',
+                bitDepth: track.bitDepth || track.bitsPerSample || null,
+                sampleRate: track.sampleRate || null
+            };
+        });
+
+        return { ok: true, results: normalized };
+    } catch (error) {
+        console.error('DAB search failed:', error);
+        return { ok: false, error: 'Search failed.' };
+    }
+});
+
+ipcMain.handle('dab-stream-url', async (event, payload) => {
+    try {
+        const config = ensureDabConfig({ apiUrl: payload?.apiUrl });
+        const apiUrl = normalizeApiUrl(config.APIURL);
+        const token = getDabToken();
+        if (!token) {
+            return { ok: false, error: 'Not logged in.' };
+        }
+
+        const trackId = payload?.trackId;
+        if (!trackId && trackId !== 0) {
+            return { ok: false, error: 'Track ID is required.' };
+        }
+
+        const streamUrl = `${apiUrl}/api/stream?trackId=${encodeURIComponent(trackId)}&quality=27`;
+        const { status, data } = await requestJson({
+            url: streamUrl,
+            headers: {
+                'User-Agent': 'ViMusic',
+                'Cookie': `session=${token}`
+            }
+        });
+
+        if (status === 401) {
+            return { ok: false, error: 'Session expired. Please log in again.' };
+        }
+        if (status !== 200) {
+            return { ok: false, error: `Stream request failed (${status}).` };
+        }
+
+        return { ok: true, url: data?.url || data?.URL || '' };
+    } catch (error) {
+        console.error('DAB stream failed:', error);
+        return { ok: false, error: 'Preview failed.' };
+    }
+});
+
+ipcMain.handle('dab-download-track', (event, payload) => {
+    if (dabProcess) {
+        return { ok: false, error: 'A download is already running.' };
+    }
+
+    const apiUrl = normalizeApiUrl(payload?.apiUrl);
+    const downloadLocation = getDefaultDabDownloadDir();
+    const track = payload?.track || {};
+    const kind = payload?.kind || track.kind || 'track';
+
+    let args = [];
+
+    if (kind === 'album') {
+        const albumId = track.id || track.albumId;
+        if (albumId) {
+            args = ['album', String(albumId)];
+        } else {
+            const albumQuery = `${track.title || ''} - ${track.artist || ''}`.trim();
+            if (!albumQuery) {
+                return { ok: false, error: 'Album ID or query is required.' };
+            }
+            args = ['search', albumQuery, '--type', 'album', '--auto'];
+        }
+    } else if (kind === 'artist') {
+        const artistId = track.id || track.artistId;
+        if (!artistId) {
+            return { ok: false, error: 'Artist ID is required.' };
+        }
+        args = ['artist', String(artistId), '--no-confirm'];
+    } else {
+        const query = track.isrc || track.query || `${track.title || ''} - ${track.artist || ''}`.trim();
+        if (!query) {
+            return { ok: false, error: 'Track query is required.' };
+        }
+        args = ['search', query, '--type', 'track', '--auto'];
+    }
+
+    const config = ensureDabConfig({ apiUrl, downloadLocation });
+    ensureDirectory(config.DownloadLocation);
+
+    const resolved = resolveDabBinaryPath();
+    if (!resolved.found) {
+        return {
+            ok: false,
+            error: `dab-downloader binary not found. Build it at dab-downloader/bin/${process.platform}/${process.platform === 'win32' ? 'dab-downloader.exe' : 'dab-downloader'}.`
+        };
+    }
+
+    const dabBinary = resolved.path;
+    const finalArgs = [
+        '--api-url', config.APIURL,
+        '--download-location', config.DownloadLocation,
+        ...args
+    ];
+
+    const processId = ++dabProcessId;
+    dabProcess = spawn(dabBinary, finalArgs, {
+        cwd: getDabDataDir(),
+        windowsHide: true
+    });
+
+    dabProcess.stdout.on('data', (data) => {
+        sendDabEvent('dab-log', { id: processId, source: 'stdout', message: data.toString() });
+    });
+    dabProcess.stderr.on('data', (data) => {
+        sendDabEvent('dab-log', { id: processId, source: 'stderr', message: data.toString() });
+    });
+    dabProcess.on('close', (code) => {
+        sendDabEvent('dab-exit', { id: processId, code });
+        dabProcess = null;
+    });
+    dabProcess.on('error', (error) => {
+        sendDabEvent('dab-log', { id: processId, source: 'stderr', message: error.message });
+        sendDabEvent('dab-exit', { id: processId, code: 1 });
+        dabProcess = null;
+    });
+
+    return { ok: true, id: processId };
+});
+
 // Helper functions for manual attachments
 const loadManualAttachments = () => {
     const manualPath = path.join(getUserDataPath(), 'manual-lyrics.json');
@@ -284,6 +724,8 @@ ipcMain.handle('get-music-files', async () => {
             const format = metadata.format || {};
              
             const musicTitle = sanitizeTitle(common.title || file.replace(/\.[^/.]+$/, ''));
+            const genre = Array.isArray(common.genre) ? common.genre[0] : (common.genre || '');
+            const releaseDate = common.date || common.year || common.originaldate || common.originalyear || '';
             
             // Get file stats for dateAdded
             const stats = fs.statSync(filePath);
@@ -300,6 +742,9 @@ ipcMain.handle('get-music-files', async () => {
                 artist: common.artist || 'Unknown Artist',
                 album: common.album || 'Unknown Album',
                 duration: metadata.format.duration || 0,
+                genre: genre,
+                year: common.year || '',
+                releaseDate: releaseDate,
                 lossless: typeof format.lossless === 'boolean' ? format.lossless : null,
                 sampleRate: Number.isFinite(sampleRate) ? sampleRate : null,
                 bitDepth: Number.isFinite(bitDepth) ? bitDepth : null,
@@ -322,6 +767,9 @@ ipcMain.handle('get-music-files', async () => {
                 artist: 'Unknown Artist',
                 album: 'Unknown Album',
                 duration: 0,
+                genre: '',
+                year: '',
+                releaseDate: '',
                 lossless: null,
                 sampleRate: null,
                 bitDepth: null,
