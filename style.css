@@ -590,6 +590,11 @@ body.settings-open .right-panel {
     overflow-y: auto;
     display: flex;
     flex-direction: column;
+    transform: translateZ(0);
+    backface-visibility: hidden;
+    will-change: transform;
+    contain: paint;
+    isolation: isolate;
 }
 
 
@@ -1849,6 +1854,9 @@ body.light-theme .color-box.selected {
     align-items: center;
     gap: 12px;
     transition: background 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+    content-visibility: auto;
+    contain: layout paint;
+    contain-intrinsic-size: auto 72px;
 }
 
 .song-checkbox {
@@ -2295,6 +2303,19 @@ body.light-theme .playlist-selection-menu .menu-item:hover {
     gap: 6px;
 }
 
+body.is-scrolling .song-item {
+    transition: none;
+}
+
+body.is-scrolling .song-item:hover {
+    transform: none;
+}
+
+body.is-scrolling .video-player,
+body.is-scrolling .details-panel {
+    box-shadow: none;
+}
+
 .song-artist img {
     width: 12px;
     height: 12px;
@@ -2460,6 +2481,7 @@ body.light-theme .playlist-selection-menu .menu-item:hover {
     padding: 20px;
     margin-bottom: 20px;
     text-align: center;
+    contain: paint;
 }
 
 .album-cover {
@@ -2519,13 +2541,20 @@ body.light-theme .playlist-selection-menu .menu-item:hover {
     overflow: hidden;
     box-shadow: 0 10px 20px rgba(0,0,0,0.3);
     position: relative;
+    transform: translateZ(0);
+    backface-visibility: hidden;
+    will-change: transform;
+    contain: paint;
 }
 
 .video-player video {
     width: 100%;
     height: auto;
     display: block;
-    border-radius: 8px;
+    background: #000;
+    transform: translateZ(0);
+    backface-visibility: hidden;
+    will-change: transform;
 }
 
 body.light-theme .video-player {
@@ -5518,6 +5547,10 @@ body.light-theme .download-logs-panel {
     align-items: center;
     justify-content: center;
     position: relative;
+    transform: translateZ(0);
+    backface-visibility: hidden;
+    will-change: transform;
+    contain: paint;
 }
 
 .main-panel-video video {
@@ -5525,6 +5558,10 @@ body.light-theme .download-logs-panel {
     height: 100%;
     object-fit: contain;
     display: block;
+    background: #000;
+    transform: translateZ(0);
+    backface-visibility: hidden;
+    will-change: transform;
 }
 
 body.light-theme .main-panel-video {

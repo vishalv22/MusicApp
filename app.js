@@ -28,6 +28,7 @@ class MusicPlayer {
         this.selectionAnchorDisplayIndex = null;
         this.songIndexLookup = new Map();
         this.scrollbarTimeouts = {};
+        this.scrollbarHideState = {};
         this.shuffleHistory = [];
         this.shuffleQueue = [];
         this.currentCategory = 'all';
@@ -62,6 +63,13 @@ class MusicPlayer {
         this.downloadLastCount = 0;
         this.previewMode = false;
         this.previewTrack = null;
+        this.progressSyncInterval = null;
+        this.progressSyncIntervalMs = 500;
+        this.lastEndedEventAt = 0;
+        this.songSelectionToken = 0;
+        this.guardWarnings = new Set();
+        this.mediaTransitionToken = 0;
+        this.autoResumeSuppressedUntil = 0;
         
         // Audio context for equalizer
         this.audioContext = null;
@@ -89,6 +97,11 @@ class MusicPlayer {
         this.queueList = null;
         this.queueMeta = null;
         this.queueCoverUrlCache = new Map();
+        this.songCoverRenderQueue = [];
+        this.songCoverRenderToken = 0;
+        this.songCoverRenderRafId = 0;
+        this.songCoverRenderIdleId = null;
+        this.songCoverRenderScheduled = false;
 
         // Media Session / SMTC integration
         this.mediaSessionEnabled = false;
@@ -114,6 +127,40 @@ class MusicPlayer {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+
+    logGuardWarningOnce(key, message) {
+        if (!this.guardWarnings) this.guardWarnings = new Set();
+        if (this.guardWarnings.has(key)) return;
+        this.guardWarnings.add(key);
+        console.warn(message);
+    }
+
+    beginMediaTransition(reason = '') {
+        this.mediaTransitionToken += 1;
+        this.lastMediaTransitionReason = reason;
+        return this.mediaTransitionToken;
+    }
+
+    isMediaTransitionCurrent(token) {
+        return token === this.mediaTransitionToken;
+    }
+
+    addOneTimeMediaListener(target, eventName, handler, transitionToken = null) {
+        if (!target || typeof target.addEventListener !== 'function' || typeof handler !== 'function') return;
+        target.addEventListener(eventName, (event) => {
+            if (transitionToken !== null && !this.isMediaTransitionCurrent(transitionToken)) return;
+            handler(event);
+        }, { once: true });
+    }
+
+    suppressAutoResume(durationMs = 400) {
+        const ms = Number.isFinite(durationMs) ? Math.max(0, durationMs) : 400;
+        this.autoResumeSuppressedUntil = Math.max(this.autoResumeSuppressedUntil || 0, Date.now() + ms);
+    }
+
+    canAutoResumePlayback() {
+        return Date.now() >= (this.autoResumeSuppressedUntil || 0);
     }
 
     // Helper function to update song badge
@@ -579,7 +626,10 @@ class MusicPlayer {
         });
         
         this.audio.ontimeupdate = () => this.updateTime();
-        this.audio.onended = () => this.playNext();
+        this.audio.onended = () => {
+            this.lastEndedEventAt = Date.now();
+            this.playNext();
+        };
         this.audio.onloadedmetadata = () => {
             this.updateDuration();
             this.updateMediaSessionPositionState(true);
@@ -591,6 +641,7 @@ class MusicPlayer {
                 this.startVisualizer();
             }
             this.syncMediaSessionPlaybackState();
+            this.startProgressSync();
         };
         this.audio.onpause = () => {
             if (!this.isVideoMode) {
@@ -599,11 +650,15 @@ class MusicPlayer {
                 this.stopVisualizer();
             }
             this.syncMediaSessionPlaybackState();
+            this.stopProgressSync();
         };
         
         // Video event handlers
         this.videoElement.ontimeupdate = () => this.updateTime();
-        this.videoElement.onended = () => this.playNext();
+        this.videoElement.onended = () => {
+            this.lastEndedEventAt = Date.now();
+            this.playNext();
+        };
         this.videoElement.onloadedmetadata = () => {
             this.updateDuration();
             this.updateMediaSessionPositionState(true);
@@ -615,6 +670,7 @@ class MusicPlayer {
             }
             this.startVisualizer();
             this.syncMediaSessionPlaybackState();
+            this.startProgressSync();
         };
         this.videoElement.ondblclick = () => this.toggleVideoAspectRatio();
         this.videoElement.onwaiting = () => this.handleVideoBuffering();
@@ -628,6 +684,7 @@ class MusicPlayer {
             }
             this.stopVisualizer();
             this.syncMediaSessionPlaybackState();
+            this.stopProgressSync();
         };
         this.videoElement.oncontextmenu = (e) => {
             if (this.isVideoMode) {
@@ -656,6 +713,7 @@ class MusicPlayer {
         this.setupVisibilityHandler();
         this.setupPlayerBarSizing();
         this.setupScrollbarTimeout();
+        this.setupScrollPerformanceHints();
         this.setupSettings();
         this.setupSongContextMenuDelegation();
         this.loadSettings();
@@ -677,6 +735,7 @@ class MusicPlayer {
             const musicFiles = await ipcRenderer.invoke('get-music-files');
             const videoFiles = await ipcRenderer.invoke('get-video-files') || [];
             const lyricsFiles = await ipcRenderer.invoke('get-lyrics-files');
+            const lyricsFileSet = new Set(Array.isArray(lyricsFiles) ? lyricsFiles : []);
             
             // Combine music and video files
             const allFiles = [...musicFiles, ...videoFiles.map(video => ({
@@ -687,7 +746,7 @@ class MusicPlayer {
             this.songs = allFiles.map((file, index) => {
                 const song = {
                     ...file,
-                    hasLyrics: !file.isVideo && (lyricsFiles.includes(file.baseName) || file.lyricsMatch !== null),
+                    hasLyrics: !file.isVideo && (lyricsFileSet.has(file.baseName) || file.lyricsMatch !== null),
                     lyricsFile: file.lyricsMatch || file.baseName,
                     loadIndex: index // Track loading order
                 };
@@ -730,12 +789,14 @@ class MusicPlayer {
                     this.playPauseImg.src = 'icons/play.png';
                     // Restore last playback position after audio loads
                     if (this.settings.lastCurrentTime) {
-                        this.audio.onloadedmetadata = () => {
-                            this.audio.currentTime = this.settings.lastCurrentTime;
+                        const resumeTime = this.settings.lastCurrentTime;
+                        const resumeTransitionToken = this.mediaTransitionToken;
+                        this.addOneTimeMediaListener(this.audio, 'loadedmetadata', () => {
+                            this.audio.currentTime = resumeTime;
                             this.updateDuration();
                             this.updateProgress();
                             this.updateMediaSessionPositionState(true);
-                        };
+                        }, resumeTransitionToken);
                     }
                 }
             }
@@ -840,6 +901,8 @@ class MusicPlayer {
             console.error('Invalid song index:', index);
             return;
         }
+        const selectionToken = ++this.songSelectionToken;
+        const transitionToken = this.beginMediaTransition('select-song');
         if (this.previewMode) {
             this.previewMode = false;
             this.previewTrack = null;
@@ -882,8 +945,16 @@ class MusicPlayer {
         });
         
         // Stop any playing video to prevent dual audio
+        this.suppressAutoResume();
         this.videoElement.pause();
         this.videoElement.src = '';
+
+        // Cancel any in-flight crossfades and restore target volume
+        if (this.crossfadeInterval) {
+            clearInterval(this.crossfadeInterval);
+            this.crossfadeInterval = null;
+        }
+        this.restorePlaybackVolume();
         
         // Always load music first with maximum quality
         this.audio.src = `file:///${song.path.replace(/\\/g, '/')}`;
@@ -985,6 +1056,7 @@ class MusicPlayer {
         // Load lyrics (only for audio files)
         if (song.hasLyrics && !song.isVideo) {
             const lyricsText = await ipcRenderer.invoke('read-lyrics', song.lyricsFile);
+            if (selectionToken !== this.songSelectionToken || !this.isMediaTransitionCurrent(transitionToken)) return;
             this.parseLyrics(lyricsText);
             ipcRenderer.send('update-floating-lyrics', {
                 lyrics: this.lyrics,
@@ -1152,21 +1224,27 @@ class MusicPlayer {
     }
     
     play() {
+        const transitionToken = this.beginMediaTransition('play-audio');
         // Ensure video is completely stopped
+        this.suppressAutoResume();
         this.videoElement.pause();
         this.videoElement.src = '';
         
         this.initializeAudioContext();
+        this.resumeAudioContext();
+
+        const targetVolume = this.restorePlaybackVolume();
         
         const crossfadeDuration = this.settings.crossfadeDuration || 0;
         
         if (crossfadeDuration > 0) {
-            this.originalVolume = this.audio.volume;
+            this.originalVolume = targetVolume;
             this.audio.volume = 0;
             this.applyCrossfadeIn(crossfadeDuration);
         }
         
         this.audio.play().catch(error => {
+            if (!this.isMediaTransitionCurrent(transitionToken)) return;
             console.error('Playback failed:', error);
             this.isPlaying = false;
             this.playPauseImg.src = 'icons/play.png';
@@ -1177,14 +1255,18 @@ class MusicPlayer {
         this.playPauseImg.src = 'icons/pause.png';
         this.startVisualizer();
         this.syncMediaSessionPlaybackState();
+        this.startProgressSync();
     }
 
     pause() {
+        this.beginMediaTransition('pause-audio');
+        this.suppressAutoResume();
         this.audio.pause();
         this.isPlaying = false;
         this.playPauseImg.src = 'icons/play.png';
         this.stopVisualizer();
         this.syncMediaSessionPlaybackState();
+        this.stopProgressSync();
         
         // Clear crossfade interval
         if (this.crossfadeInterval) {
@@ -1194,7 +1276,9 @@ class MusicPlayer {
     }
     
     playVideo() {
+        const transitionToken = this.beginMediaTransition('play-video');
         // Ensure audio is completely stopped
+        this.suppressAutoResume();
         this.audio.pause();
         this.audio.src = '';
         if (this.videoInMainPanel || !this.isVisualizerViewActive) {
@@ -1203,6 +1287,7 @@ class MusicPlayer {
         
         if (this.videoElement.readyState >= 2) {
             this.videoElement.play().catch(error => {
+                if (!this.isMediaTransitionCurrent(transitionToken)) return;
                 console.error('Video playback failed:', error);
                 this.isPlaying = false;
                 this.playPauseImg.src = 'icons/play.png';
@@ -1212,24 +1297,30 @@ class MusicPlayer {
             this.playPauseImg.src = 'icons/pause.png';
             this.startVisualizer();
             this.syncMediaSessionPlaybackState();
+            this.startProgressSync();
         } else {
             this.videoElement.load();
-            this.videoElement.oncanplay = () => {
+            this.addOneTimeMediaListener(this.videoElement, 'canplay', () => {
+                if (!this.isMediaTransitionCurrent(transitionToken)) return;
                 this.videoElement.play();
                 this.isPlaying = true;
                 this.playPauseImg.src = 'icons/pause.png';
                 this.startVisualizer();
                 this.syncMediaSessionPlaybackState();
-            };
+                this.startProgressSync();
+            }, transitionToken);
         }
     }
     
     pauseVideo() {
+        this.beginMediaTransition('pause-video');
+        this.suppressAutoResume();
         this.videoElement.pause();
         this.isPlaying = false;
         this.playPauseImg.src = 'icons/play.png';
         this.stopVisualizer();
         this.syncMediaSessionPlaybackState();
+        this.stopProgressSync();
     }
     
     showVideoPlayer() {
@@ -1317,12 +1408,14 @@ class MusicPlayer {
         
         this.timeDisplay.textContent = `${currentMinutes.toString().padStart(2, '0')}:${currentSeconds.toString().padStart(2, '0')} / ${totalMinutes.toString().padStart(2, '0')}:${totalSeconds.toString().padStart(2, '0')}`;
         
-        // Handle crossfade out
-        const crossfadeDuration = this.settings.crossfadeDuration || 0;
-        if (crossfadeDuration > 0 && duration > 0 && !this.isVideoMode) {
-            const timeLeft = duration - currentTime;
-            if (timeLeft <= crossfadeDuration && timeLeft > 0 && !this.crossfadeInterval) {
-                this.applyCrossfadeOut(timeLeft);
+        // Handle crossfade out (only when actively playing)
+        if (this.isPlaying) {
+            const crossfadeDuration = this.settings.crossfadeDuration || 0;
+            if (crossfadeDuration > 0 && duration > 0 && !this.isVideoMode) {
+                const timeLeft = duration - currentTime;
+                if (timeLeft <= crossfadeDuration && timeLeft > 0 && !this.crossfadeInterval) {
+                    this.applyCrossfadeOut(timeLeft);
+                }
             }
         }
         
@@ -1340,6 +1433,66 @@ class MusicPlayer {
         this.updateProgress();
         this.highlightLyrics(currentTime);
         this.updateMediaSessionPositionState();
+    }
+
+    startProgressSync() {
+        if (this.progressSyncInterval) return;
+        this.progressSyncInterval = setInterval(() => {
+            this.syncPlaybackProgress();
+        }, this.progressSyncIntervalMs);
+    }
+
+    stopProgressSync() {
+        if (!this.progressSyncInterval) return;
+        clearInterval(this.progressSyncInterval);
+        this.progressSyncInterval = null;
+    }
+
+    syncPlaybackProgress(force = false) {
+        const media = this.isVideoMode ? this.videoElement : this.audio;
+        if (!media) return;
+
+        const isDragging = typeof this.isProgressDragging === 'function' && this.isProgressDragging();
+        const duration = media.duration;
+        const currentTime = media.currentTime;
+
+        if (!this.previewMode && this.isPlaying && !isDragging) {
+            const ended =
+                media.ended ||
+                (Number.isFinite(duration) && duration > 0 && currentTime >= duration - 0.05);
+            if (ended) {
+                const now = Date.now();
+                if (now - this.lastEndedEventAt > 500) {
+                    this.lastEndedEventAt = now;
+                    this.playNext();
+                }
+                return;
+            }
+        }
+
+        if (force || this.isPlaying) {
+            this.updateTime();
+        }
+    }
+
+    resumeAudioContext() {
+        if (!this.audioContext || typeof this.audioContext.resume !== 'function') return;
+        if (this.audioContext.state === 'running') return;
+        this.audioContext.resume().catch(() => {});
+    }
+
+    getDesiredVolume() {
+        const raw = Number.isFinite(this.settings?.volume) ? this.settings.volume : this.audio.volume;
+        if (!Number.isFinite(raw)) return 1;
+        return Math.max(0, Math.min(1, raw));
+    }
+
+    restorePlaybackVolume() {
+        const volume = this.getDesiredVolume();
+        this.audio.volume = volume;
+        this.videoElement.volume = volume;
+        this.originalVolume = volume;
+        return volume;
     }
 
     updateDuration() {
@@ -1445,6 +1598,17 @@ class MusicPlayer {
                 document.removeEventListener('mouseup', handleProgressUp);
             }
         };
+
+        const cancelProgressDrag = () => {
+            if (isProgressDragging) {
+                handleProgressUp();
+            }
+        };
+
+        window.addEventListener('blur', cancelProgressDrag);
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) cancelProgressDrag();
+        });
         
         this.progressBar.onmousedown = (e) => {
             const duration = this.isVideoMode ? this.videoElement.duration : this.audio.duration;
@@ -2620,6 +2784,14 @@ class MusicPlayer {
     async handleFileDrop(files) {
         this.showNotification('Drag & drop not supported. Use "Add Music Folder" instead.', 'info');
     }
+
+    async handleFileAdd(files, type) {
+        this.logGuardWarningOnce(
+            'handleFileAdd',
+            '[Guard] handleFileAdd is not available in this build; ignoring request.'
+        );
+        return false;
+    }
     
     setupSearch() {
         this.searchInput.oninput = (e) => {
@@ -3233,11 +3405,13 @@ class MusicPlayer {
     }
     
     switchToVideo() {
+        this.beginMediaTransition('switch-to-video');
         const currentSong = this.songs[this.currentSongIndex];
         const wasPlaying = this.isPlaying;
         const currentTime = this.audio.currentTime;
         
         // Stop music completely
+        this.suppressAutoResume();
         this.audio.pause();
         this.stopVisualizer();
         this.isPlaying = false;
@@ -3274,6 +3448,7 @@ class MusicPlayer {
     }
     
     switchToMusic() {
+        this.beginMediaTransition('switch-to-music');
         const currentSong = this.songs[this.currentSongIndex];
         const wasPlaying = this.isPlaying;
         const currentTime = this.videoElement.currentTime;
@@ -3285,6 +3460,7 @@ class MusicPlayer {
         }
         
         // Stop video completely and clear source
+        this.suppressAutoResume();
         this.videoElement.pause();
         this.videoElement.src = '';
         this.videoElement.load();
@@ -3588,6 +3764,22 @@ class MusicPlayer {
         }
 
         return { artwork, urls };
+    }
+
+    createPlaylistFromInput() {
+        this.logGuardWarningOnce(
+            'createPlaylistFromInput',
+            '[Guard] createPlaylistFromInput is not available in this build; ignoring request.'
+        );
+        return false;
+    }
+
+    hidePlaylistInput() {
+        this.logGuardWarningOnce(
+            'hidePlaylistInput',
+            '[Guard] hidePlaylistInput is not available in this build; ignoring request.'
+        );
+        return false;
     }
     
     setupPlaylists() {
@@ -5884,6 +6076,7 @@ class MusicPlayer {
     }
     
     moveVideoToMainPanel() {
+        this.beginMediaTransition('move-video-to-main-panel');
         this.disableVisualizerView(false);
         this.videoInMainPanel = true;
         this.updateVisualizerAvailability();
@@ -5892,6 +6085,7 @@ class MusicPlayer {
         const wasPlaying = !this.videoElement.paused;
         
         // Pause original video and audio completely
+        this.suppressAutoResume();
         this.videoElement.pause();
         this.audio.pause();
         this.audio.src = '';
@@ -5970,10 +6164,12 @@ class MusicPlayer {
     
     moveVideoBackToDefault() {
         if (this.videoInMainPanel && this.mainPanelVideo) {
+            this.beginMediaTransition('move-video-to-default');
             const currentTime = this.videoElement.currentTime;
             const wasPlaying = !this.videoElement.paused;
             
             // Pause main panel video and ensure audio is stopped
+            this.suppressAutoResume();
             this.videoElement.pause();
             this.audio.pause();
             this.stopVisualizer();
@@ -6009,8 +6205,30 @@ class MusicPlayer {
     
     setupMainPanelVideoEvents(videoEl) {
         videoEl.ontimeupdate = () => this.updateTime();
-        videoEl.onended = () => this.playNext();
+        videoEl.onended = () => {
+            this.lastEndedEventAt = Date.now();
+            this.playNext();
+        };
         videoEl.onloadedmetadata = () => this.updateDuration();
+        videoEl.onplay = () => {
+            if (this.isVideoMode) {
+                this.isPlaying = true;
+                this.playPauseImg.src = 'icons/pause.png';
+            }
+            this.startVisualizer();
+            this.syncMediaSessionPlaybackState();
+            this.startProgressSync();
+        };
+        videoEl.onpause = () => {
+            this.handleVideoPause();
+            if (this.isVideoMode) {
+                this.isPlaying = false;
+                this.playPauseImg.src = 'icons/play.png';
+            }
+            this.stopVisualizer();
+            this.syncMediaSessionPlaybackState();
+            this.stopProgressSync();
+        };
         videoEl.ondblclick = () => this.toggleVideoAspectRatio();
         videoEl.onclick = () => {
             if (this.isVisualizerViewActive) this.disableVisualizerView(true);
@@ -6447,8 +6665,105 @@ class MusicPlayer {
         
         return totalScore / queryWords.length;
     }
+
+    resetSongCoverRenderQueue() {
+        this.songCoverRenderToken += 1;
+        this.songCoverRenderQueue = [];
+        this.songCoverRenderScheduled = false;
+
+        if (this.songCoverRenderRafId) {
+            cancelAnimationFrame(this.songCoverRenderRafId);
+            this.songCoverRenderRafId = 0;
+        }
+        if (this.songCoverRenderIdleId && typeof cancelIdleCallback === 'function') {
+            cancelIdleCallback(this.songCoverRenderIdleId);
+        }
+        this.songCoverRenderIdleId = null;
+
+        return this.songCoverRenderToken;
+    }
+
+    isSongCoverRenderTokenCurrent(token) {
+        return token === this.songCoverRenderToken;
+    }
+
+    scheduleSongCoverRenderQueue() {
+        if (this.songCoverRenderScheduled) return;
+        this.songCoverRenderScheduled = true;
+
+        const pump = (deadline) => {
+            this.songCoverRenderScheduled = false;
+            this.songCoverRenderRafId = 0;
+            this.songCoverRenderIdleId = null;
+            this.pumpSongCoverRenderQueue(deadline);
+            if (this.songCoverRenderQueue.length > 0) {
+                this.scheduleSongCoverRenderQueue();
+            }
+        };
+
+        if (window.requestIdleCallback) {
+            this.songCoverRenderIdleId = requestIdleCallback(pump, { timeout: 120 });
+            return;
+        }
+
+        this.songCoverRenderRafId = requestAnimationFrame(() => pump());
+    }
+
+    pumpSongCoverRenderQueue(deadline) {
+        const maxPerPump = 8;
+        let processed = 0;
+
+        while (this.songCoverRenderQueue.length > 0 && processed < maxPerPump) {
+            if (
+                deadline &&
+                typeof deadline.timeRemaining === 'function' &&
+                deadline.timeRemaining() < 1 &&
+                processed > 0
+            ) {
+                break;
+            }
+
+            const task = this.songCoverRenderQueue.shift();
+            if (!task) continue;
+
+            const { coverDiv, picture, token } = task;
+            if (!this.isSongCoverRenderTokenCurrent(token)) continue;
+            if (!coverDiv || !coverDiv.isConnected) continue;
+
+            let url = null;
+            try {
+                url = URL.createObjectURL(new Blob([picture]));
+            } catch {
+                continue;
+            }
+
+            const img = document.createElement('img');
+            img.alt = 'Cover';
+            const releaseUrl = () => {
+                if (!url) return;
+                URL.revokeObjectURL(url);
+                url = null;
+            };
+            img.onload = releaseUrl;
+            img.onerror = releaseUrl;
+
+            coverDiv.innerHTML = '';
+            coverDiv.appendChild(img);
+            img.src = url;
+
+            processed++;
+        }
+    }
+
+    queueSongCoverRender(coverDiv, picture, token) {
+        if (!coverDiv || !picture) return;
+        if (!this.isSongCoverRenderTokenCurrent(token)) return;
+        this.songCoverRenderQueue.push({ coverDiv, picture, token });
+        this.scheduleSongCoverRenderQueue();
+    }
     
     displayFilteredSongs() {
+        const coverRenderToken = this.resetSongCoverRenderQueue();
         const songsToShow = this.filteredSongs.length > 0 ? this.filteredSongs : this.songs;
         
         if (songsToShow.length === 0) {
@@ -6461,7 +6776,7 @@ class MusicPlayer {
         this.songsDiv.innerHTML = '<div class="loading">Loading songs...</div>';
         
         // Use requestIdleCallback for better performance
-        const renderCallback = () => this.renderSongsBatch(songsToShow, 0);
+        const renderCallback = () => this.renderSongsBatch(songsToShow, 0, coverRenderToken);
         if (window.requestIdleCallback) {
             requestIdleCallback(renderCallback);
         } else {
@@ -6469,7 +6784,8 @@ class MusicPlayer {
         }
     }
     
-    renderSongsBatch(songsToShow, startIndex) {
+    renderSongsBatch(songsToShow, startIndex, coverRenderToken = this.songCoverRenderToken) {
+        if (!this.isSongCoverRenderTokenCurrent(coverRenderToken)) return;
         const batchSize = 200; // Larger batch for playlists
         const endIndex = Math.min(startIndex + batchSize, songsToShow.length);
         
@@ -6531,12 +6847,10 @@ class MusicPlayer {
             
             // Load cover image asynchronously
             if (song.picture) {
-                setTimeout(() => {
-                    const coverDiv = div.querySelector('.song-cover');
-                    if (coverDiv) {
-                        coverDiv.innerHTML = `<img src="${URL.createObjectURL(new Blob([song.picture]))}" alt="Cover">`;
-                    }
-                }, i * 2); // Stagger image loading
+                const coverDiv = div.querySelector('.song-cover');
+                if (coverDiv) {
+                    this.queueSongCoverRender(coverDiv, song.picture, coverRenderToken);
+                }
             }
              
             div.onclick = (e) => {
@@ -6602,7 +6916,7 @@ class MusicPlayer {
         
         if (endIndex < songsToShow.length) {
             requestAnimationFrame(() => {
-                this.renderSongsBatch(songsToShow, endIndex);
+                this.renderSongsBatch(songsToShow, endIndex, coverRenderToken);
             });
         }
     }
@@ -7349,9 +7663,12 @@ class MusicPlayer {
     
     handleVideoPause() {
         // Prevent browser from pausing video when window is hidden
-        if (this.isVideoMode && this.isPlaying && document.hidden) {
+        if (this.isVideoMode && this.isPlaying && document.hidden && this.canAutoResumePlayback()) {
+            const transitionToken = this.mediaTransitionToken;
             setTimeout(() => {
-                if (this.videoElement.paused) {
+                if (!this.isMediaTransitionCurrent(transitionToken)) return;
+                if (!this.canAutoResumePlayback()) return;
+                if (this.videoElement.paused && this.isVideoMode && this.isPlaying && document.hidden) {
                     this.videoElement.play();
                 }
             }, 50);
@@ -7360,13 +7677,31 @@ class MusicPlayer {
     
     setupVisibilityHandler() {
         document.addEventListener('visibilitychange', () => {
-            if (this.isVideoMode && this.isPlaying && document.hidden) {
-                // Force video to continue playing in background
-                setTimeout(() => {
-                    if (this.videoElement.paused && this.isPlaying) {
-                        this.videoElement.play();
-                    }
-                }, 100);
+            if (document.hidden) {
+                if (this.isVideoMode && this.isPlaying) {
+                    // Force video to continue playing in background
+                    const transitionToken = this.mediaTransitionToken;
+                    setTimeout(() => {
+                        if (!this.isMediaTransitionCurrent(transitionToken)) return;
+                        if (!this.canAutoResumePlayback()) return;
+                        if (this.videoElement.paused && this.isPlaying && this.isVideoMode && document.hidden) {
+                            this.videoElement.play();
+                        }
+                    }, 100);
+                } else if (!this.isVideoMode && this.isPlaying) {
+                    // Ensure audio keeps going when the app is minimized
+                    const transitionToken = this.mediaTransitionToken;
+                    setTimeout(() => {
+                        if (!this.isMediaTransitionCurrent(transitionToken)) return;
+                        if (!this.canAutoResumePlayback()) return;
+                        if (this.audio.paused && this.isPlaying && !this.isVideoMode && document.hidden) {
+                            this.audio.play().catch(() => {});
+                        }
+                    }, 100);
+                }
+            } else {
+                this.resumeAudioContext();
+                this.syncPlaybackProgress(true);
             }
         });
     }
@@ -7652,6 +7987,59 @@ class MusicPlayer {
             updateValue();
         });
     }
+
+    setupScrollPerformanceHints() {
+        const targets = [this.musicList, this.leftPanel].filter(Boolean);
+        if (targets.length === 0) return;
+        const body = document.body;
+        if (!body) return;
+
+        const nowFn =
+            (typeof performance !== 'undefined' && typeof performance.now === 'function')
+                ? () => performance.now()
+                : () => Date.now();
+
+        let rafId = 0;
+        let hideTimeoutId = 0;
+        let lastScrollAt = 0;
+        let scrollHintActive = false;
+
+        const activateScrollHint = () => {
+            rafId = 0;
+            if (scrollHintActive) return;
+            scrollHintActive = true;
+            body.classList.add('is-scrolling');
+        };
+
+        const scheduleHideCheck = () => {
+            if (hideTimeoutId) return;
+            const checkIdle = () => {
+                const elapsed = nowFn() - lastScrollAt;
+                if (elapsed < 140) {
+                    hideTimeoutId = setTimeout(checkIdle, Math.max(0, 140 - elapsed));
+                    return;
+                }
+                hideTimeoutId = 0;
+                if (!scrollHintActive) return;
+                scrollHintActive = false;
+                body.classList.remove('is-scrolling');
+            };
+            hideTimeoutId = setTimeout(checkIdle, 140);
+        };
+
+        const handleScroll = () => {
+            lastScrollAt = nowFn();
+            if (!scrollHintActive && !rafId) {
+                rafId = requestAnimationFrame(activateScrollHint);
+            }
+            scheduleHideCheck();
+        };
+
+        targets.forEach(el => {
+            el.addEventListener('scroll', handleScroll, { passive: true });
+        });
+    }
+
 
     refreshCustomSelects() {
         const wraps = document.querySelectorAll('.setting-select-wrap');
@@ -8086,34 +8474,69 @@ class MusicPlayer {
         }
     }
     
-    showScrollbar(element, name) {
-        // Clear existing timeout
-        if (this.scrollbarTimeouts[name]) {
-            clearTimeout(this.scrollbarTimeouts[name]);
-            delete this.scrollbarTimeouts[name];
+    scheduleScrollbarHide(element, name, delayMs) {
+        if (!element || !name) return;
+        if (!this.scrollbarHideState) this.scrollbarHideState = {};
+
+        const nowFn =
+            (typeof performance !== 'undefined' && typeof performance.now === 'function')
+                ? () => performance.now()
+                : () => Date.now();
+
+        let state = this.scrollbarHideState[name];
+        if (!state) {
+            state = { timerId: 0, hideAt: 0, nextFireAt: 0 };
+            this.scrollbarHideState[name] = state;
         }
-        
-        // Show scrollbar
-        element.classList.add('show-scrollbar');
-        
-        // Set timeout to hide after 1 second
-        this.scrollbarTimeouts[name] = setTimeout(() => {
-            element.classList.remove('show-scrollbar');
+
+        state.hideAt = nowFn() + delayMs;
+
+        const tick = () => {
+            const remaining = state.hideAt - nowFn();
+            if (remaining > 4) {
+                state.timerId = setTimeout(tick, Math.max(0, remaining));
+                state.nextFireAt = nowFn() + Math.max(0, remaining);
+                this.scrollbarTimeouts[name] = state.timerId;
+                return;
+            }
+
+            state.timerId = 0;
+            state.nextFireAt = 0;
+            if (element.classList.contains('show-scrollbar')) {
+                element.classList.remove('show-scrollbar');
+            }
             delete this.scrollbarTimeouts[name];
-        }, 1000);
+        };
+
+        if (state.timerId) {
+            if (state.hideAt + 1 < state.nextFireAt) {
+                clearTimeout(state.timerId);
+                const wait = Math.max(0, state.hideAt - nowFn());
+                state.timerId = setTimeout(tick, wait);
+                state.nextFireAt = nowFn() + wait;
+                this.scrollbarTimeouts[name] = state.timerId;
+            }
+            return;
+        }
+
+        const wait = Math.max(0, state.hideAt - nowFn());
+        state.timerId = setTimeout(tick, wait);
+        state.nextFireAt = nowFn() + wait;
+        this.scrollbarTimeouts[name] = state.timerId;
+    }
+
+    showScrollbar(element, name) {
+        if (!element || !name) return;
+        if (!element.classList.contains('show-scrollbar')) {
+            element.classList.add('show-scrollbar');
+        }
+        this.scheduleScrollbarHide(element, name, 1000);
     }
     
     hideScrollbarWithDelay(element, name) {
-        // Clear existing timeout
-        if (this.scrollbarTimeouts[name]) {
-            clearTimeout(this.scrollbarTimeouts[name]);
-        }
-        
-        // Set shorter timeout when mouse leaves
-        this.scrollbarTimeouts[name] = setTimeout(() => {
-            element.classList.remove('show-scrollbar');
-            delete this.scrollbarTimeouts[name];
-        }, 500);
+        if (!element || !name) return;
+        if (!element.classList.contains('show-scrollbar') && !this.scrollbarTimeouts[name]) return;
+        this.scheduleScrollbarHide(element, name, 500);
     }
     
     applyCrossfadeIn(duration) {
@@ -8419,17 +8842,20 @@ class MusicPlayer {
     }
     
     async syncAttachedVideo(song, autoPlay) {
+        const transitionToken = this.mediaTransitionToken;
         // Wait for both audio and video metadata to load
         await Promise.all([
             new Promise(resolve => {
                 if (this.audio.readyState >= 1) resolve();
-                else this.audio.onloadedmetadata = resolve;
+                else this.addOneTimeMediaListener(this.audio, 'loadedmetadata', resolve);
             }),
             new Promise(resolve => {
                 if (this.videoElement.readyState >= 1) resolve();
-                else this.videoElement.onloadedmetadata = resolve;
+                else this.addOneTimeMediaListener(this.videoElement, 'loadedmetadata', resolve);
             })
         ]);
+
+        if (!this.isMediaTransitionCurrent(transitionToken)) return;
         
         const audioDuration = this.audio.duration;
         const videoDuration = this.videoElement.duration;

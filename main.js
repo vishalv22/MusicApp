@@ -957,6 +957,11 @@ ipcMain.handle('add-music-folders', async (event, folderPaths) => {
     return newFolders.length;
 });
 
+// Guard-only IPC: keep legacy callers from invoking an undefined channel.
+ipcMain.handle('add-files', async () => {
+    throw new Error('add-files IPC is not implemented in this build.');
+});
+
 // Remove watched folder
 ipcMain.handle('remove-music-folder', async (event, folderPath) => {
     const watchedFolders = getWatchedFolders();
