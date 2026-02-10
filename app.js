@@ -269,6 +269,7 @@ class MusicPlayer {
             dabStatusEl: 'dabStatus',
             downloadLogsToggleBtn: 'downloadLogsToggleBtn',
             downloadLogsPanel: 'downloadLogsPanel',
+            downloadCopyLogsBtn: 'downloadCopyLogsBtn',
             downloadClearLogsBtn: 'downloadClearLogsBtn',
             downloadStatusEl: 'downloadStatus',
             downloadLogsEl: 'downloadLogs'
@@ -3686,6 +3687,7 @@ class MusicPlayer {
         if (this.dabLoginBtn) this.dabLoginBtn.onclick = () => this.handleDabLogin();
         if (this.dabLogoutBtn) this.dabLogoutBtn.onclick = () => this.handleDabLogout();
         if (this.downloadLogsToggleBtn) this.downloadLogsToggleBtn.onclick = () => this.toggleDownloadLogs();
+        if (this.downloadCopyLogsBtn) this.downloadCopyLogsBtn.onclick = () => this.copyDownloadLogs();
         if (this.downloadClearLogsBtn) this.downloadClearLogsBtn.onclick = () => this.clearDownloadLogs();
 
         if (this.downloadResultsEl) {
@@ -4191,6 +4193,34 @@ class MusicPlayer {
     clearDownloadLogs() {
         this.downloadLogs = [];
         if (this.downloadLogsEl) this.downloadLogsEl.textContent = '';
+    }
+
+    async copyDownloadLogs() {
+        const text = Array.isArray(this.downloadLogs) ? this.downloadLogs.join('\n') : '';
+        if (!text.trim()) {
+            this.showNotification('No logs to copy', 'info');
+            return;
+        }
+
+        try {
+            if (navigator?.clipboard?.writeText) {
+                await navigator.clipboard.writeText(text);
+            } else {
+                const temp = document.createElement('textarea');
+                temp.value = text;
+                temp.setAttribute('readonly', '');
+                temp.style.position = 'absolute';
+                temp.style.left = '-9999px';
+                document.body.appendChild(temp);
+                temp.select();
+                document.execCommand('copy');
+                temp.remove();
+            }
+            this.showNotification('Logs copied', 'success');
+        } catch (error) {
+            console.error('Failed to copy logs:', error);
+            this.showNotification('Failed to copy logs', 'error');
+        }
     }
 
     toggleDownloadLogs() {

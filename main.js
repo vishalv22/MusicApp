@@ -115,8 +115,8 @@ const deleteDabToken = () => {
 const resolveDabBinaryPath = () => {
     const platform = process.platform;
     const binaryName = platform === 'win32' ? 'dab-downloader.exe' : 'dab-downloader';
-    const packagedPath = path.join(process.resourcesPath, 'dab-downloader', 'bin', platform, binaryName);
-    const devPath = path.join(__dirname, 'dab-downloader', 'bin', platform, binaryName);
+    const packagedPath = path.join(process.resourcesPath, 'bin', 'dab-downloader', 'bin', platform, binaryName);
+    const devPath = path.join(__dirname, 'resources', 'bin', 'dab-downloader', 'bin', platform, binaryName);
 
     if (fs.existsSync(packagedPath)) return { path: packagedPath, found: true };
     if (fs.existsSync(devPath)) return { path: devPath, found: true };
@@ -583,7 +583,7 @@ ipcMain.handle('dab-download-track', (event, payload) => {
     if (!resolved.found) {
         return {
             ok: false,
-            error: `dab-downloader binary not found. Build it at dab-downloader/bin/${process.platform}/${process.platform === 'win32' ? 'dab-downloader.exe' : 'dab-downloader'}.`
+            error: `dab-downloader binary not found. Build it at resources/bin/dab-downloader/bin/${process.platform}/${process.platform === 'win32' ? 'dab-downloader.exe' : 'dab-downloader'}.`
         };
     }
 

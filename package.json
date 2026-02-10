@@ -37,8 +37,8 @@
         "filter": ["**/*"]
       },
       {
-        "from": "dab-downloader/bin/",
-        "to": "dab-downloader/bin/",
+        "from": "resources/bin/dab-downloader/bin/",
+        "to": "bin/dab-downloader/bin/",
         "filter": ["**/*"]
       }
     ],
