@@ -1,6 +1,6 @@
 {
   "name": "vimusic",
-  "version": "0.9.0-beta",
+  "version": "1.0.0",
   "description": "ViMusic - A music player with synchronized lyrics",
   "main": "main.js",
   "author": "Vishal",
