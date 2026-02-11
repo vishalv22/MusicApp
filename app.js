@@ -47,6 +47,11 @@ class MusicPlayer {
         this.downloadLogs = [];
         this.downloadInProgress = false;
         this.downloadProcessId = null;
+        this.downloadCancelRequestedForId = null;
+        this.downloadCompletedKeys = new Set();
+        this.downloadStateRenderRaf = 0;
+        this.downloadSearchLoading = false;
+        this.downloadSearchToken = 0;
         this.downloadSettings = {};
         this.downloadPanelInitialized = false;
         this.downloadIpcBound = false;
@@ -109,6 +114,7 @@ class MusicPlayer {
         this.mediaSessionUpdateToken = 0;
         this.mediaSessionPositionUpdateAt = 0;
         this.mediaSessionFallbackArtwork = 'icons/default-playlist.png';
+        this.songSearchDocCache = new WeakMap();
 
         
         this.initElements();
@@ -127,6 +133,15 @@ class MusicPlayer {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+
+    escapeAttribute(value) {
+        return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
     }
 
     logGuardWarningOnce(key, message) {
@@ -763,6 +778,7 @@ class MusicPlayer {
                 
                 return song;
             });
+            this.songSearchDocCache = new WeakMap();
             
             this.loadRatings();
             // Sort by rating on refresh
@@ -775,7 +791,10 @@ class MusicPlayer {
             if (this.currentPlaylist) {
                 this.loadPlaylist(this.currentPlaylist);
             } else {
-                this.displaySongs();
+                const categoryToApply = this.normalizeCategory(this.currentCategory || this.settings?.selectedCategory || 'all');
+                this.currentCategory = categoryToApply;
+                this.updateCategorySelectionUi(categoryToApply);
+                this.applyCategoryView(categoryToApply);
             }
             
             this.showNotification(`Loaded ${this.songs.length} files`, 'success');
@@ -2649,6 +2668,37 @@ class MusicPlayer {
         ipcRenderer.send('view-song-in-folder', song.path);
         this.hideSongContextMenu();
     }
+
+    prepareSongsForDeletion(songsToDelete = []) {
+        if (!Array.isArray(songsToDelete) || songsToDelete.length === 0) return;
+        const currentSong = this.songs[this.currentSongIndex];
+        if (!currentSong) return;
+
+        const deletingCurrentSong = songsToDelete.some(song => (
+            song === currentSong ||
+            (song?.path && currentSong.path && song.path === currentSong.path)
+        ));
+
+        if (!deletingCurrentSong) return;
+
+        this.beginMediaTransition('delete-song');
+        this.suppressAutoResume();
+        this.audio.pause();
+        this.videoElement.pause();
+        this.audio.src = '';
+        this.audio.load();
+        this.videoElement.src = '';
+        this.videoElement.load();
+        this.isPlaying = false;
+        this.playPauseImg.src = 'icons/play.png';
+        this.stopVisualizer();
+        this.stopProgressSync();
+        this.syncMediaSessionPlaybackState();
+        this.currentSongIndex = -1;
+        this.settings.lastSongName = '';
+        this.settings.lastCurrentTime = 0;
+        this.saveSettings();
+    }
     
     async deleteSong() {
         if (this.selectedSongIndex < 0 || this.selectedSongIndex >= this.songs.length) {
@@ -2659,7 +2709,7 @@ class MusicPlayer {
         const song = this.songs[this.selectedSongIndex];
         const ok = await this.showConfirmDialog({
             title: 'Delete song?',
-            message: `This will permanently delete "${song.title}" from disk.`,
+            message: `Move "${song.title}" to Recycle Bin?`,
             confirmText: 'Delete',
             kind: 'danger'
         });
@@ -2668,8 +2718,14 @@ class MusicPlayer {
             return;
         }
 
+        this.prepareSongsForDeletion([song]);
         this.showNotification('Deleting song...', 'info');
-        ipcRenderer.invoke('delete-song', song.name).then((success) => {
+        ipcRenderer.invoke('delete-song', {
+            filePath: song.path,
+            fileName: song.name,
+            baseName: song.baseName,
+            isVideo: !!song.isVideo
+        }).then((success) => {
             if (success) {
                 this.showNotification('Song deleted successfully', 'success');
                 this.loadMusic();
@@ -2827,6 +2883,8 @@ class MusicPlayer {
             if (e.key === 'Escape') {
                 this.searchInput.value = '';
                 if (this.currentView === 'download') {
+                    this.downloadSearchLoading = false;
+                    this.downloadSearchToken += 1;
                     this.downloadResults = [];
                     this.renderDownloadResults();
                 } else {
@@ -3917,8 +3975,8 @@ class MusicPlayer {
             this.searchInput.value = '';
             this.searchInput.placeholder = this.dabLoggedIn ? 'Search online catalog...' : 'Log in to search the catalog';
         }
-        if (this.downloadLogsPanel) this.downloadLogsPanel.style.display = this.dabLoggedIn ? 'flex' : 'none';
-        if (this.downloadLogsToggleBtn) this.downloadLogsToggleBtn.textContent = this.dabLoggedIn ? 'Hide Logs' : 'Logs';
+        if (this.downloadLogsPanel) this.downloadLogsPanel.style.display = 'none';
+        if (this.downloadLogsToggleBtn) this.downloadLogsToggleBtn.textContent = 'Logs';
         this.refreshDownloadSettings();
         this.renderDownloadResults();
     }
@@ -3946,7 +4004,7 @@ class MusicPlayer {
             if (!this.dabLoggedIn) {
                 this.setDownloadResultsStatus('Please log in to search the catalog.');
             } else if (!this.searchInput?.value?.trim()) {
-                this.setDownloadResultsStatus('Use the top search bar and press Enter.');
+                this.setDownloadResultsStatus('');
             }
         } catch (error) {
             console.error('Failed to load DAB settings:', error);
@@ -3966,6 +4024,75 @@ class MusicPlayer {
         } else {
             this.downloadResultsStatus.textContent = message;
         }
+    }
+
+    getDownloadResultKey(track, explicitKind = null) {
+        if (!track) return '';
+        const kind = String(explicitKind || track.kind || 'track').toLowerCase();
+        const normalize = (value) => String(value || '').trim().toLowerCase();
+        const primitiveId = (value) => {
+            if (value === null || value === undefined) return '';
+            if (typeof value === 'string' || typeof value === 'number') {
+                return String(value);
+            }
+            if (typeof value === 'object') {
+                const nested = value.id ?? value.trackId ?? value.albumId ?? value.artistId ?? value.value ?? '';
+                if (nested === null || nested === undefined) return '';
+                if (typeof nested === 'string' || typeof nested === 'number') return String(nested);
+            }
+            return '';
+        };
+
+        if (kind === 'artist') {
+            const id = primitiveId(track.id) || primitiveId(track.artistId);
+            return id ? `artist:${normalize(id)}` : '';
+        }
+        if (kind === 'album') {
+            const id = primitiveId(track.id) || primitiveId(track.albumId);
+            return id ? `album:${normalize(id)}` : '';
+        }
+
+        const id = primitiveId(track.id) || primitiveId(track.isrc);
+        return id ? `track:${normalize(id)}` : '';
+    }
+
+    getDownloadStateForResult(track, kind) {
+        const key = this.getDownloadResultKey(track, kind);
+        if (!key) return { key: '', state: 'idle', progress: 0 };
+
+        const matchingItems = this.downloadQueueItems.filter(item => item.downloadKey === key);
+        if (!matchingItems.length) {
+            if (this.downloadCompletedKeys.has(key)) return { key, state: 'done', progress: 100 };
+            return { key, state: 'idle', progress: 0 };
+        }
+
+        const matchingStatuses = matchingItems.map(item => item.status);
+        const activeItems = matchingItems.filter(item => (
+            item.status === 'running' || item.status === 'queued' || item.status === 'cancelling'
+        ));
+        const progressSource = activeItems.length ? activeItems : matchingItems;
+        const progress = progressSource.reduce((max, item) => {
+            const value = Number(item.progress);
+            if (!Number.isFinite(value)) return max;
+            const clamped = Math.max(0, Math.min(100, value));
+            return Math.max(max, clamped);
+        }, 0);
+
+        if (matchingStatuses.includes('cancelling')) return { key, state: 'cancelling', progress };
+        if (matchingStatuses.includes('running')) return { key, state: 'running', progress };
+        if (matchingStatuses.includes('queued')) return { key, state: 'queued', progress };
+
+        const latestItem = matchingItems.reduce((latest, item) => {
+            const latestRank = Number(latest?.createdAt || latest?.id || 0);
+            const itemRank = Number(item?.createdAt || item?.id || 0);
+            return itemRank >= latestRank ? item : latest;
+        }, null);
+
+        if (latestItem?.status === 'error') return { key, state: 'error', progress };
+        if (latestItem?.status === 'cancelled') return { key, state: 'cancelled', progress };
+        if (latestItem?.status === 'done') return { key, state: 'done', progress: 100 };
+        if (this.downloadCompletedKeys.has(key)) return { key, state: 'done', progress: 100 };
+        return { key, state: 'idle', progress };
     }
 
     getDownloadTypeLabel(type) {
@@ -4031,12 +4158,12 @@ class MusicPlayer {
         if (this.dabLogoutBtn) {
             this.dabLogoutBtn.style.display = loggedIn ? 'inline-flex' : 'none';
         }
-        if (loggedIn && this.currentView === 'download') {
-            if (this.downloadLogsPanel) this.downloadLogsPanel.style.display = 'flex';
-            if (this.downloadLogsToggleBtn) this.downloadLogsToggleBtn.textContent = 'Hide Logs';
-        } else if (!loggedIn) {
+        if (!loggedIn) {
             if (this.downloadLogsPanel) this.downloadLogsPanel.style.display = 'none';
-            if (this.downloadLogsToggleBtn) this.downloadLogsToggleBtn.textContent = 'Logs';
+        }
+        if (this.downloadLogsToggleBtn && this.downloadLogsPanel) {
+            const logsVisible = window.getComputedStyle(this.downloadLogsPanel).display !== 'none';
+            this.downloadLogsToggleBtn.textContent = logsVisible ? 'Hide Logs' : 'Logs';
         }
     }
 
@@ -4092,6 +4219,8 @@ class MusicPlayer {
             return;
         }
 
+        const requestToken = ++this.downloadSearchToken;
+        this.downloadSearchLoading = true;
         this.setDownloadStatus('Searching...');
         this.downloadLastQuery = query;
         const typeLabel = this.getDownloadTypeLabel(this.downloadSearchType);
@@ -4099,42 +4228,82 @@ class MusicPlayer {
         this.downloadResults = [];
         this.renderDownloadResults();
 
-        const result = await ipcRenderer.invoke('dab-search', { query, type: this.downloadSearchType });
-        if (!result?.ok) {
-            this.setDownloadStatus(result?.error || 'Search failed');
-            this.showNotification(result?.error || 'Search failed', 'error');
-            this.setDownloadResultsStatus(result?.error || 'Search failed.');
-            return;
-        }
+        try {
+            const result = await ipcRenderer.invoke('dab-search', { query, type: this.downloadSearchType });
+            if (requestToken !== this.downloadSearchToken) return;
 
-        this.downloadResults = Array.isArray(result.results) ? result.results : [];
-        const count = this.downloadResults.length;
-        this.downloadLastCount = count;
-        this.setDownloadStatus(count ? `Found ${count} result${count === 1 ? '' : 's'}` : 'No results');
-        const noun = typeLabel.toLowerCase();
-        const countLabel = `(${count} unique ${noun}${count === 1 ? '' : 's'} loaded)`;
-        this.setDownloadResultsStatus(`Searching for: <span class="download-results-highlight">${typeLabel}</span> ${countLabel}`, { html: true });
-        this.renderDownloadResults();
+            if (!result?.ok) {
+                this.setDownloadStatus(result?.error || 'Search failed');
+                this.showNotification(result?.error || 'Search failed', 'error');
+                this.setDownloadResultsStatus(result?.error || 'Search failed.');
+                this.downloadResults = [];
+                return;
+            }
+
+            this.downloadResults = Array.isArray(result.results) ? result.results : [];
+            const count = this.downloadResults.length;
+            this.downloadLastCount = count;
+            this.setDownloadStatus(count ? `Found ${count} result${count === 1 ? '' : 's'}` : 'No results');
+            const noun = typeLabel.toLowerCase();
+            const countLabel = `(${count} unique ${noun}${count === 1 ? '' : 's'} loaded)`;
+            this.setDownloadResultsStatus(`Searching for: <span class="download-results-highlight">${typeLabel}</span> ${countLabel}`, { html: true });
+        } catch (error) {
+            if (requestToken !== this.downloadSearchToken) return;
+            console.error('Download search failed:', error);
+            this.setDownloadStatus('Search failed');
+            this.showNotification('Search failed', 'error');
+            this.setDownloadResultsStatus('Search failed.');
+            this.downloadResults = [];
+        } finally {
+            if (requestToken === this.downloadSearchToken) {
+                this.downloadSearchLoading = false;
+                this.renderDownloadResults();
+            }
+        }
     }
 
     renderDownloadResults() {
         if (!this.downloadResultsEl) return;
         const results = Array.isArray(this.downloadResults) ? this.downloadResults : [];
 
+        if (this.downloadSearchLoading) {
+            this.downloadResultsEl.innerHTML = `
+                <div class="download-loading-state" aria-live="polite" aria-label="Loading search results">
+                    <div class="download-loading-spinner" aria-hidden="true"></div>
+                </div>
+            `;
+            return;
+        }
+
         if (!results.length) {
             this.downloadResultsEl.innerHTML = `
-                <div class="download-empty">${this.dabLoggedIn ? 'Use the top search bar to find tracks, albums, or artists.' : 'Log in to search the catalog.'}</div>
+                <div class="download-empty${this.dabLoggedIn ? ' download-search-hint' : ''}">${this.dabLoggedIn ? 'Try searching song name with artist name for better result.' : 'Log in to search the catalog.'}</div>
             `;
             return;
         }
 
         const previewId = this.previewTrack?.id;
         this.downloadResultsEl.innerHTML = results.map((track, index) => {
-            const kind = track.kind || 'track';
-            const cover = track.coverUrl
-                ? `<img src="${track.coverUrl}" alt="">`
+            const rawKind = String(track.kind || 'track').toLowerCase();
+            const kind = rawKind === 'album' || rawKind === 'artist' ? rawKind : 'track';
+            const { key, state, progress } = this.getDownloadStateForResult(track, kind);
+            const coverUrl = String(track.coverUrl || '').trim().replace(/^['"]+|['"]+$/g, '');
+            const cover = coverUrl
+                ? `<img src="${this.escapeAttribute(coverUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
                 : `<div class="cover-placeholder">🎵</div>`;
             const isPreviewing = previewId !== undefined && previewId !== null && track.id === previewId;
+            const showProgress = !!key && (state === 'running' || state === 'queued' || state === 'cancelling');
+            const progressNumber = Number(progress);
+            const fallbackProgress = state === 'queued' ? 2 : (state === 'running' ? 4 : (state === 'cancelling' ? 99 : 0));
+            const progressPercent = Math.max(
+                fallbackProgress,
+                Number.isFinite(progressNumber) ? Math.max(0, Math.min(100, progressNumber)) : 0
+            );
+            const rowClasses = `download-result${isPreviewing ? ' is-previewing' : ''}${showProgress ? ' has-download-progress' : ''}`;
+            const progressStyle = showProgress ? ` style="--download-progress:${progressPercent.toFixed(1)}%;"` : '';
+            const progressMarkup = showProgress
+                ? `<div class="download-result-progress" aria-hidden="true"><span class="download-result-progress-fill"></span></div>`
+                : '';
             let title = track.title || track.name || 'Unknown';
             let artistLine = '';
             let metaHtml = '';
@@ -4158,9 +4327,21 @@ class MusicPlayer {
                     ? `<div class="download-result-meta-row">${meta.map(item => `<span class="download-meta-pill">${item}</span>`).join('')}</div>`
                     : '';
                 const previewLabel = isPreviewing ? 'Stop' : 'Play';
+                let downloadAction = '';
+                if (state === 'done') {
+                    downloadAction = `<span class="download-result-done" title="Downloaded">✓ Downloaded</span>`;
+                } else if (state === 'running') {
+                    downloadAction = `<button class="download-action-btn danger" data-action="cancel-download">Cancel</button>`;
+                } else if (state === 'cancelling') {
+                    downloadAction = `<button class="download-action-btn danger" disabled>Cancelling...</button>`;
+                } else if (state === 'queued') {
+                    downloadAction = `<button class="download-action-btn" disabled>Queued</button>`;
+                } else {
+                    downloadAction = `<button class="download-action-btn primary" data-action="download-track" ${this.downloadInProgress ? 'disabled' : ''}>Download</button>`;
+                }
                 actions = `
                     <button class="download-action-btn" data-action="play">${previewLabel}</button>
-                    <button class="download-action-btn primary" data-action="download-track" ${this.downloadInProgress ? 'disabled' : ''}>Download</button>
+                    ${downloadAction}
                 `;
             } else if (kind === 'album') {
                 const artist = track.artist || 'Unknown Artist';
@@ -4171,16 +4352,36 @@ class MusicPlayer {
                 metaHtml = meta.length
                     ? `<div class="download-result-meta-row">${meta.map(item => `<span class="download-meta-pill">${item}</span>`).join('')}</div>`
                     : '';
-                actions = `<button class="download-action-btn primary" data-action="download-album" ${this.downloadInProgress ? 'disabled' : ''}>Download</button>`;
+                if (state === 'done') {
+                    actions = `<span class="download-result-done" title="Downloaded">✓ Downloaded</span>`;
+                } else if (state === 'running') {
+                    actions = `<button class="download-action-btn danger" data-action="cancel-download">Cancel</button>`;
+                } else if (state === 'cancelling') {
+                    actions = `<button class="download-action-btn danger" disabled>Cancelling...</button>`;
+                } else if (state === 'queued') {
+                    actions = `<button class="download-action-btn" disabled>Queued</button>`;
+                } else {
+                    actions = `<button class="download-action-btn primary" data-action="download-album" ${this.downloadInProgress ? 'disabled' : ''}>Download</button>`;
+                }
             } else if (kind === 'artist') {
                 artistLine = `<div class="download-result-sub">Artist</div>`;
                 metaHtml = '';
-                actions = `<button class="download-action-btn primary" data-action="download-artist" ${this.downloadInProgress ? 'disabled' : ''}>Download</button>`;
+                if (state === 'done') {
+                    actions = `<span class="download-result-done" title="Downloaded">✓ Downloaded</span>`;
+                } else if (state === 'running') {
+                    actions = `<button class="download-action-btn danger" data-action="cancel-download">Cancel</button>`;
+                } else if (state === 'cancelling') {
+                    actions = `<button class="download-action-btn danger" disabled>Cancelling...</button>`;
+                } else if (state === 'queued') {
+                    actions = `<button class="download-action-btn" disabled>Queued</button>`;
+                } else {
+                    actions = `<button class="download-action-btn primary" data-action="download-artist" ${this.downloadInProgress ? 'disabled' : ''}>Download</button>`;
+                }
                 title = track.name || track.title || 'Unknown Artist';
             }
 
             return `
-                <div class="download-result ${isPreviewing ? 'is-previewing' : ''}" data-index="${index}">
+                <div class="${rowClasses}" data-index="${index}" data-download-state="${state}"${progressStyle}>
                     <div class="download-result-cover">${cover}</div>
                     <div class="download-result-meta">
                         <div class="download-result-title">${this.escapeHtml(title)}</div>
@@ -4188,6 +4389,7 @@ class MusicPlayer {
                         ${metaHtml}
                     </div>
                     <div class="download-result-actions">${actions}</div>
+                    ${progressMarkup}
                 </div>
             `;
         }).join('');
@@ -4225,6 +4427,8 @@ class MusicPlayer {
                 name: track.artist || track.name
             };
             this.queueDownloadItem(artistItem, 'artist');
+        } else if (action === 'cancel-download') {
+            this.cancelActiveDownload();
         }
     }
 
@@ -4271,11 +4475,14 @@ class MusicPlayer {
             item,
             title,
             artist,
+            downloadKey: this.getDownloadResultKey(item, kind),
+            progress: this.downloadInProgress ? 0 : 3,
             status: this.downloadInProgress ? 'queued' : 'running',
             createdAt: Date.now()
         };
 
         this.downloadQueueItems.push(job);
+        this.renderDownloadResults();
 
         if (this.downloadInProgress) {
             this.pendingDownloadQueue.push(job);
@@ -4294,8 +4501,13 @@ class MusicPlayer {
             return;
         }
         this.downloadInProgress = true;
+        this.downloadCancelRequestedForId = null;
         this.activeDownloadJob = job;
         this.downloadProcessId = null;
+        if (!job.downloadKey) {
+            job.downloadKey = this.getDownloadResultKey(job.item, job.kind);
+        }
+        job.progress = Math.max(3, Number(job.progress) || 0);
         job.status = 'running';
         this.renderDownloadQueue();
         this.clearDownloadLogs();
@@ -4332,6 +4544,45 @@ class MusicPlayer {
         this.downloadProcessId = result.id;
     }
 
+    async cancelActiveDownload() {
+        if (!this.downloadInProgress || !this.downloadProcessId || !this.activeDownloadJob) {
+            this.showNotification('No active download to cancel', 'info');
+            return;
+        }
+
+        const activeJob = this.activeDownloadJob;
+        if (activeJob.status === 'cancelling') return;
+
+        this.downloadCancelRequestedForId = this.downloadProcessId;
+        activeJob.status = 'cancelling';
+        this.setDownloadStatus(`Cancelling "${activeJob.title}"...`);
+        this.renderDownloadQueue();
+        this.renderDownloadResults();
+
+        try {
+            const result = await ipcRenderer.invoke('dab-cancel-download', this.downloadProcessId);
+            if (result?.ok) return;
+
+            this.downloadCancelRequestedForId = null;
+            if (this.activeDownloadJob === activeJob && activeJob.status === 'cancelling') {
+                activeJob.status = 'running';
+            }
+            this.setDownloadStatus(result?.error || 'Failed to cancel download');
+            this.showNotification(result?.error || 'Failed to cancel download', 'error');
+            this.renderDownloadQueue();
+            this.renderDownloadResults();
+        } catch (error) {
+            this.downloadCancelRequestedForId = null;
+            if (this.activeDownloadJob === activeJob && activeJob.status === 'cancelling') {
+                activeJob.status = 'running';
+            }
+            this.setDownloadStatus('Failed to cancel download');
+            this.showNotification('Failed to cancel download', 'error');
+            this.renderDownloadQueue();
+            this.renderDownloadResults();
+        }
+    }
+
     startNextQueuedDownload() {
         if (this.downloadInProgress) return;
         const next = this.pendingDownloadQueue.shift();
@@ -4340,29 +4591,83 @@ class MusicPlayer {
         }
     }
 
+    scheduleDownloadStateRender() {
+        if (this.downloadStateRenderRaf) return;
+        this.downloadStateRenderRaf = window.requestAnimationFrame(() => {
+            this.downloadStateRenderRaf = 0;
+            this.renderDownloadQueue();
+            this.renderDownloadResults();
+        });
+    }
+
+    updateActiveDownloadProgress(progressValue) {
+        const job = this.activeDownloadJob;
+        if (!job) return;
+        const numeric = Number(progressValue);
+        if (!Number.isFinite(numeric)) return;
+
+        const clamped = Math.max(0, Math.min(100, numeric));
+        const previous = Number(job.progress);
+        const safePrevious = Number.isFinite(previous) ? previous : 0;
+        if (clamped <= safePrevious && clamped < 100) return;
+
+        job.progress = clamped;
+        this.scheduleDownloadStateRender();
+    }
+
     handleDabLog(payload) {
         if (!payload) return;
         if (this.downloadProcessId && payload.id !== this.downloadProcessId) return;
         const message = String(payload.message || '').replace(/\r/g, '\n');
         const lines = message.split('\n').filter(line => line.trim().length);
-        lines.forEach(line => this.appendDownloadLog(line));
+        lines.forEach(line => {
+            this.appendDownloadLog(line);
+            const percentMatch = line.match(/(\d{1,3}(?:\.\d+)?)\s*%/);
+            if (percentMatch) {
+                this.updateActiveDownloadProgress(parseFloat(percentMatch[1]));
+            }
+        });
     }
 
     handleDabExit(payload) {
         if (!payload) return;
         if (this.downloadProcessId && payload.id !== this.downloadProcessId) return;
 
+        const wasCancelled = this.downloadCancelRequestedForId !== null && payload.id === this.downloadCancelRequestedForId;
+        this.downloadCancelRequestedForId = null;
         this.downloadInProgress = false;
         this.downloadProcessId = null;
-        const success = payload.code === 0;
+        const successByExitCode = !wasCancelled && payload.code === 0;
+        const downloadedFileDetected = payload.downloadedFileDetected === true;
+        const success = successByExitCode && downloadedFileDetected;
+        const noFileDownloaded = successByExitCode && !downloadedFileDetected;
         const job = this.activeDownloadJob;
         if (job) {
-            job.status = success ? 'done' : 'error';
-            if (!success) job.error = job.error || 'Download failed';
+            if (wasCancelled) {
+                job.status = 'cancelled';
+                job.error = 'Download cancelled';
+            } else {
+                job.status = success ? 'done' : 'error';
+                if (success && job.downloadKey) {
+                    job.progress = 100;
+                    this.downloadCompletedKeys.add(job.downloadKey);
+                }
+                if (!success) {
+                    if (job.downloadKey) {
+                        this.downloadCompletedKeys.delete(job.downloadKey);
+                    }
+                    job.error = job.error || (noFileDownloaded ? 'No new files were downloaded' : 'Download failed');
+                }
+            }
         }
         this.activeDownloadJob = null;
-        this.setDownloadStatus(success ? 'Download complete' : 'Download failed');
-        this.showNotification(success ? 'Download complete' : 'Download failed', success ? 'success' : 'error');
+        const statusMessage = wasCancelled
+            ? 'Download cancelled'
+            : success
+                ? 'Download complete'
+                : (noFileDownloaded ? 'No files downloaded' : 'Download failed');
+        this.setDownloadStatus(statusMessage);
+        this.showNotification(statusMessage, wasCancelled || noFileDownloaded ? 'info' : (success ? 'success' : 'error'));
         this.renderDownloadQueue();
         this.renderDownloadResults();
 
@@ -4436,10 +4741,14 @@ class MusicPlayer {
         this.downloadQueueEl.innerHTML = items.map(item => {
             const statusLabel = item.status === 'running'
                 ? 'Running'
+                : item.status === 'cancelling'
+                  ? 'Cancelling'
                 : item.status === 'queued'
                   ? 'Queued'
-                  : item.status === 'done'
+                : item.status === 'done'
                     ? 'Done'
+                    : item.status === 'cancelled'
+                      ? 'Cancelled'
                     : 'Error';
             const subtitle = item.kind === 'artist'
                 ? 'Artist'
@@ -4686,6 +4995,7 @@ class MusicPlayer {
     
     setupPlaylistBgEdit(playlistName) {
         const bgEditIcon = document.getElementById('playlistBgEditIcon');
+        if (!bgEditIcon) return;
         
         // Remove existing handler
         bgEditIcon.onclick = null;
@@ -4812,44 +5122,40 @@ class MusicPlayer {
             counter++;
             name = `Playlist ${counter}`;
         }
-        
-        // Create playlist automatically
-        this.playlists[name] = {
-            songs: [],
-            pinned: false,
-            coverImage: 'icons/default-playlist.png',
-            createdAt: Date.now()
-        };
-        
-        this.playlistOrder.push(name);
-        this.savePlaylists();
-        this.displayPlaylists();
 
-        this.loadPlaylist(name);
-        this.showPlaylistModal(name, { fallbackName: name });
+        // Open dedicated create flow; data is created only on Done.
+        this.showPlaylistModal(null, { suggestedName: name });
     }
     
     showPlaylistModal(editingName = null, options = {}) {
         const isEditing = !!editingName;
         const playlistData = isEditing ? this.playlists[editingName] : null;
+        const mode = isEditing ? 'edit' : 'create';
+        const modalTitle = isEditing ? 'Edit Playlist' : 'Create Playlist';
+        const modalSubtitle = isEditing
+            ? 'Update playlist name or cover image.'
+            : 'Choose a playlist name and optional cover image.';
+        const confirmText = isEditing ? 'Save Changes' : 'Create';
+        const initialName = isEditing ? (editingName || '') : (options.suggestedName || '');
+        const coverSrc = isEditing ? this.getPlaylistCoverUrl(editingName) : 'icons/default-playlist.png';
         
         const modal = document.createElement('div');
-        modal.className = 'playlist-modal-overlay';
+        modal.className = `playlist-modal-overlay playlist-editor-overlay ${mode}-mode`;
         modal.dataset.editing = isEditing;
+        modal.dataset.mode = mode;
         if (isEditing) modal.dataset.originalName = editingName;
-        const fallbackName = options.fallbackName || editingName || '';
-        if (fallbackName) modal.dataset.fallbackName = fallbackName;
         
         modal.innerHTML = `
-            <div class="playlist-modal">
-                <h3>${isEditing ? 'Edit Playlist' : 'Create Playlist'}</h3>
+            <div class="playlist-modal playlist-editor-modal playlist-editor-modal--${mode}" role="dialog" aria-modal="true" aria-label="${modalTitle}">
+                <h3>${modalTitle}</h3>
+                <p class="playlist-editor-subtitle">${modalSubtitle}</p>
                 <div class="modal-cover">
-                    <img src="${isEditing ? this.getPlaylistCoverUrl(editingName) : 'icons/default-playlist.png'}" id="modalCoverImg">
+                    <img src="${coverSrc}" id="modalCoverImg">
                 </div>
-                <input type="text" id="modalPlaylistName" placeholder="Playlist name" maxlength="14" value="${editingName || ''}">
+                <input type="text" id="modalPlaylistName" placeholder="Playlist name" maxlength="14" value="${initialName}" autocomplete="off" spellcheck="false">
                 <div class="modal-buttons">
-                    <button id="modalCancel">Cancel</button>
-                    <button id="modalDone">Done</button>
+                    <button type="button" id="modalCancel">Cancel</button>
+                    <button type="button" id="modalDone">${confirmText}</button>
                 </div>
             </div>
         `;
@@ -4866,16 +5172,17 @@ class MusicPlayer {
         const nameInput = document.getElementById('modalPlaylistName');
         const doneBtn = document.getElementById('modalDone');
         
-        // Force focus and style Done button
+        // Force focus
         setTimeout(() => {
             nameInput.focus();
             nameInput.select();
         }, 150);
-        doneBtn.style.backgroundColor = '#2d5a2d';
-        doneBtn.style.color = 'white';
         
         // Store reference to this for event handlers
         const player = this;
+        const closeModal = () => {
+            modal.remove();
+        };
         
         nameInput.onkeydown = function(e) {
             if (e.key === 'Enter') {
@@ -4885,7 +5192,7 @@ class MusicPlayer {
         };
         
         document.getElementById('modalCancel').onclick = function() {
-            modal.remove();
+            closeModal();
         };
         
         doneBtn.onclick = function() {
@@ -4897,7 +5204,7 @@ class MusicPlayer {
         };
         
         modal.onclick = function(e) {
-            if (e.target === modal) modal.remove();
+            if (e.target === modal) closeModal();
         };
     }
     
@@ -4922,13 +5229,17 @@ class MusicPlayer {
     
     createPlaylistFromModal(modal) {
         const inputValue = document.getElementById('modalPlaylistName').value.trim();
-        const isEditing = modal.dataset.editing;
-        const originalName = modal.dataset.originalName;
-        const fallbackName = modal.dataset.fallbackName || originalName || '';
+        const isEditing = modal.dataset.editing === 'true';
+        const originalName = modal.dataset.originalName || '';
+        const fallbackName = isEditing ? originalName : '';
         const name = inputValue || fallbackName;
         
         if (!name) {
             this.showNotification('Playlist name cannot be empty', 'error');
+            return;
+        }
+        if (isEditing && !originalName) {
+            this.showNotification('Unable to edit playlist', 'error');
             return;
         }
         if (!isEditing && this.playlists[name]) {
@@ -4967,10 +5278,13 @@ class MusicPlayer {
         
         this.savePlaylists();
         this.displayPlaylists();
-        // Update playlist details if currently viewing this playlist
-        if (this.currentPlaylist === (isEditing ? originalName : name)) {
-            const playlistSongs = this.getPlaylistSongs(isEditing ? name : name);
-            this.showPlaylistDetails(isEditing ? name : name, playlistSongs.length, playlistSongs);
+        if (!isEditing) {
+            this.loadPlaylist(name);
+        }
+        // Update playlist details if currently viewing edited playlist.
+        if (isEditing && this.currentPlaylist === originalName) {
+            const playlistSongs = this.getPlaylistSongs(name);
+            this.showPlaylistDetails(name, playlistSongs.length, playlistSongs);
         }
         modal.remove();
     }
@@ -5102,17 +5416,13 @@ class MusicPlayer {
             
             if (coverImage && !coverImage.startsWith('icons/')) {
                 coverImg.src = `file:///${coverImage.replace(/\\/g, '/')}`;
-                coverImg.style.width = '100%';
-                coverImg.style.height = '100%';
-                coverImg.style.objectFit = 'cover';
-                coverImg.style.filter = 'none';
             } else {
                 coverImg.src = 'icons/default-playlist.png';
-                coverImg.style.width = '40px';
-                coverImg.style.height = '40px';
-                coverImg.style.objectFit = 'initial';
-                coverImg.style.filter = 'none';
             }
+            coverImg.style.width = '100%';
+            coverImg.style.height = '100%';
+            coverImg.style.objectFit = 'cover';
+            coverImg.style.filter = 'none';
             
             // Set background image
             const bgImage = Array.isArray(playlistData) ? null : (playlistData?.backgroundImage || null);
@@ -5176,17 +5486,13 @@ class MusicPlayer {
         const coverImg = document.querySelector('.playlist-cover-img');
         if (imagePath) {
             coverImg.src = `file:///${imagePath.replace(/\\/g, '/')}`;
-            coverImg.style.width = '100%';
-            coverImg.style.height = '100%';
-            coverImg.style.objectFit = 'cover';
-            coverImg.style.filter = 'none';
         } else {
             coverImg.src = 'icons/default-playlist.png';
-            coverImg.style.width = '40px';
-            coverImg.style.height = '40px';
-            coverImg.style.objectFit = 'initial';
-            coverImg.style.filter = 'none';
         }
+        coverImg.style.width = '100%';
+        coverImg.style.height = '100%';
+        coverImg.style.objectFit = 'cover';
+        coverImg.style.filter = 'none';
         // Update slide panel playlist items
         this.displayPlaylists();
     }
@@ -5202,6 +5508,66 @@ class MusicPlayer {
         const isVisible = dropdown.style.display === 'block';
         dropdown.style.display = isVisible ? 'none' : 'block';
     }
+
+    normalizeCategory(category) {
+        const normalized = String(category || '').toLowerCase();
+        return ['all', 'video', 'rated', 'recent'].includes(normalized) ? normalized : 'all';
+    }
+
+    getCategoryMeta(category) {
+        const normalized = this.normalizeCategory(category);
+        const meta = {
+            all: { label: 'All Songs', icon: 'icons/all-song.png' },
+            video: { label: 'Video Songs', icon: 'icons/video-songs.png' },
+            rated: { label: 'Rated Songs', icon: 'icons/star-songs.png' },
+            recent: { label: 'Recently Added', icon: 'icons/clock.png' }
+        };
+        return meta[normalized];
+    }
+
+    updateCategorySelectionUi(category, displayText = null) {
+        const selectedCategory = document.getElementById('selectedCategory');
+        if (!selectedCategory) return;
+
+        const meta = this.getCategoryMeta(category);
+        const label = (displayText && String(displayText).trim()) || meta.label;
+        selectedCategory.innerHTML = `<img src="${meta.icon}"> ${label}`;
+    }
+
+    applyCategoryView(category, options = {}) {
+        const { showNotification = false } = options;
+        const normalized = this.normalizeCategory(category);
+
+        this.currentPlaylist = null;
+        this.hidePlaylistDetails();
+
+        switch (normalized) {
+            case 'video':
+                this.filteredSongs = this.getSongsForCategory('video');
+                this.displayFilteredSongs();
+                if (showNotification) this.showNotification('Showing video songs only', 'info');
+                break;
+            case 'rated':
+                this.filteredSongs = this.getSongsForCategory('rated');
+                this.displayFilteredSongs();
+                if (showNotification) this.showNotification('Showing rated songs only', 'info');
+                break;
+            case 'recent':
+                this.filteredSongs = this.getSongsForCategory('recent');
+                this.displayFilteredSongs();
+                if (showNotification) {
+                    this.showNotification(`Showing ${this.filteredSongs.length} recently added songs`, 'info');
+                }
+                break;
+            case 'all':
+            default:
+                this.displaySongs();
+                if (showNotification) this.showNotification('Showing all songs', 'info');
+                break;
+        }
+
+        this.displayPlaylists();
+    }
     
     selectCategory(category, displayText) {
         // Close dropdown and update UI immediately
@@ -5216,60 +5582,18 @@ class MusicPlayer {
         this.searchInput.value = '';
         
         // Track current category
-        this.currentCategory = category;
-        
-        const selectedCategory = document.getElementById('selectedCategory');
-        const iconMap = {
-            'all': 'icons/all-song.png',
-            'video': 'icons/video-songs.png', 
-            'rated': 'icons/star-songs.png',
-            'recent': 'icons/clock.png'
-        };
-        
-        const iconPath = iconMap[category];
-        if (iconPath) {
-            selectedCategory.innerHTML = `<img src="${iconPath}"> ${displayText}`;
-        } else {
-            selectedCategory.textContent = displayText;
-        }
+        const normalizedCategory = this.normalizeCategory(category);
+        this.currentCategory = normalizedCategory;
+        this.settings.selectedCategory = normalizedCategory;
+        this.saveSettings();
+        this.updateCategorySelectionUi(normalizedCategory, displayText);
         
         // Show loading immediately
         this.songsDiv.innerHTML = '<div class="loading">Filtering songs...</div>';
         
         // Process filtering asynchronously
         requestAnimationFrame(() => {
-            this.currentPlaylist = null;
-            this.hidePlaylistDetails();
-            
-            switch(category) {
-                case 'all':
-                    this.displaySongs();
-                    this.showNotification('Showing all songs', 'info');
-                    break;
-                case 'video':
-                    this.filteredSongs = this.songs.filter(song => song.isVideo || song.attachedVideo);
-                    this.displayFilteredSongs();
-                    this.showNotification('Showing video songs only', 'info');
-                    break;
-                case 'rated':
-                    this.filteredSongs = this.songs.filter(song => song.rating && song.rating > 0);
-                    this.displayFilteredSongs();
-                    this.showNotification('Showing rated songs only', 'info');
-                    break;
-                case 'recent':
-                    // Get recently added songs (top 50)
-                    const recentSongs = [...this.songs]
-                        .filter(song => song.dateAdded)
-                        .sort((a, b) => new Date(b.dateAdded) - new Date(a.dateAdded))
-                        .slice(0, 50);
-                    this.filteredSongs = recentSongs;
-                    this.displayFilteredSongs();
-                    this.showNotification(`Showing ${recentSongs.length} recently added songs`, 'info');
-                    break;
-
-            }
-            
-            this.displayPlaylists();
+            this.applyCategoryView(normalizedCategory, { showNotification: true });
         });
     }
     
@@ -5735,19 +6059,26 @@ class MusicPlayer {
             return;
         }
 
-        const count = indices.length;
+        const songsToDelete = indices.map(idx => this.songs[idx]).filter(Boolean);
+        const count = songsToDelete.length;
         const ok = await this.showConfirmDialog({
             title: 'Delete selected songs?',
-            message: `This will permanently delete ${count} song${count === 1 ? '' : 's'} from disk.`,
+            message: `Move ${count} song${count === 1 ? '' : 's'} to Recycle Bin?`,
             confirmText: 'Delete',
             kind: 'danger'
         });
         if (!ok) return;
 
+        this.prepareSongsForDeletion(songsToDelete);
         this.showNotification(`Deleting ${count} song${count === 1 ? '' : 's'}...`, 'info');
 
-        const names = indices.map(idx => this.songs[idx]?.name).filter(Boolean);
-        const results = await Promise.allSettled(names.map(name => ipcRenderer.invoke('delete-song', name)));
+        const deleteRequests = songsToDelete.map(song => ({
+            filePath: song.path,
+            fileName: song.name,
+            baseName: song.baseName,
+            isVideo: !!song.isVideo
+        }));
+        const results = await Promise.allSettled(deleteRequests.map(payload => ipcRenderer.invoke('delete-song', payload)));
         const successCount = results.filter(r => r.status === 'fulfilled' && r.value).length;
         const failCount = count - successCount;
 
@@ -6454,216 +6785,297 @@ class MusicPlayer {
         // Get the current song list to search within
         const songsToSearch = this.currentPlaylist ? 
             this.getPlaylistSongs(this.currentPlaylist) : this.songs;
-        
-        if (!query || typeof query !== 'string' || !query.trim()) {
+
+        const normalizedQuery = this.normalizeSearchText(query);
+        const queryTokens = this.tokenizeSearchText(normalizedQuery);
+
+        if (!normalizedQuery) {
             this.filteredSongs = [...songsToSearch];
         } else {
-            const results = songsToSearch.map(song => ({
+            const { primaryThreshold, fallbackThreshold } = this.getSearchThresholds(normalizedQuery, queryTokens.length);
+            const scored = songsToSearch.map(song => ({
                 song,
-                score: this.calculateRelevanceScore(song, query)
-            })).filter(item => item.score > 0.2)
-              .sort((a, b) => {
-                  // Sort by score first, then by title for consistent ordering
-                  if (Math.abs(a.score - b.score) < 0.01) {
-                      return a.song.title.localeCompare(b.song.title);
-                  }
-                  return b.score - a.score;
-              })
-              .map(item => item.song);
-            
-            this.filteredSongs = results;
+                score: this.calculateRelevanceScore(song, normalizedQuery, queryTokens)
+            }));
+
+            const byScoreThenTitle = (a, b) => {
+                if (Math.abs(a.score - b.score) < 0.01) {
+                    return String(a.song?.title || '').localeCompare(String(b.song?.title || ''));
+                }
+                return b.score - a.score;
+            };
+
+            let matches = scored
+                .filter(item => item.score >= primaryThreshold)
+                .sort(byScoreThenTitle);
+
+            // If strict filtering misses typo-heavy queries, fallback to strong close matches.
+            if (matches.length === 0) {
+                matches = scored
+                    .filter(item => item.score >= fallbackThreshold)
+                    .sort(byScoreThenTitle);
+            }
+
+            this.filteredSongs = matches.map(item => item.song);
         }
+
         this.displayFilteredSongs();
         this.renderQueuePanelIfVisible();
     }
-    
-    calculateRelevanceScore(song, query) {
-        const cleanQuery = this.cleanSearchText(query);
-        const queryWords = cleanQuery.split(' ').filter(w => w.length > 0);
-        
-        const fields = [
-            { text: this.cleanSearchText(song.title), weight: 0.6 },
-            { text: this.cleanSearchText(song.artist), weight: 0.3 },
-            { text: this.cleanSearchText(song.album), weight: 0.1 }
-        ];
-        
-        let maxScore = 0;
-        
-        for (const field of fields) {
-            if (field.text) {
-                const score = this.enhancedMatch(field.text, cleanQuery, queryWords) * field.weight;
-                maxScore = Math.max(maxScore, score);
-            }
-        }
-        
-        return maxScore;
-    }
-    
-    cleanSearchText(text) {
-        if (!text) return '';
-        return text.toLowerCase()
-            .replace(/[^a-z0-9\s&]/g, ' ')  // Keep & for band names
+
+    normalizeSearchText(text) {
+        if (text === null || text === undefined) return '';
+        return String(text)
+            .normalize('NFKD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/[^a-z0-9\s&]/g, ' ')
             .replace(/\s+/g, ' ')
             .trim();
     }
-    
-    enhancedMatch(text, query, queryWords) {
-        if (!text || !query) return 0;
-        
-        // Exact match gets highest score
-        if (text === query) return 1.0;
-        
-        // Full query contained in text
-        if (text.includes(query)) {
-            if (text.startsWith(query)) return 0.95;
-            return 0.9;
-        }
-        
-        const textWords = text.split(' ').filter(w => w.length > 0);
-        let bestScore = 0;
-        
-        // Single word queries - prioritize exact word matches
-        if (queryWords.length === 1) {
-            const queryWord = queryWords[0];
-            for (const word of textWords) {
-                if (word === queryWord) return 0.85;
-                if (word.startsWith(queryWord)) {
-                    bestScore = Math.max(bestScore, 0.8);
-                } else if (word.includes(queryWord)) {
-                    bestScore = Math.max(bestScore, 0.6);
+
+    tokenizeSearchText(text) {
+        if (!text) return [];
+        return text.split(' ').filter(Boolean);
+    }
+
+    getSongAlbumText(song) {
+        return song?.album || song?.albumName || song?.albumTitle || song?.metadata?.album || '';
+    }
+
+    getSongSearchDoc(song) {
+        if (!song) return null;
+        const cached = this.songSearchDocCache?.get(song);
+        if (cached) return cached;
+
+        const titleText = this.normalizeSearchText(song.title || song.name || song.baseName || '');
+        const artistText = this.normalizeSearchText(song.artist || song.albumArtist || '');
+        const albumText = this.normalizeSearchText(this.getSongAlbumText(song));
+        const fileText = this.normalizeSearchText(song.baseName || song.name || '');
+        const combinedText = [titleText, artistText, albumText, fileText].filter(Boolean).join(' ').trim();
+
+        const doc = {
+            title: { text: titleText, tokens: this.tokenizeSearchText(titleText) },
+            artist: { text: artistText, tokens: this.tokenizeSearchText(artistText) },
+            album: { text: albumText, tokens: this.tokenizeSearchText(albumText) },
+            file: { text: fileText, tokens: this.tokenizeSearchText(fileText) },
+            combined: { text: combinedText, tokens: this.tokenizeSearchText(combinedText) }
+        };
+
+        if (this.songSearchDocCache) this.songSearchDocCache.set(song, doc);
+        return doc;
+    }
+
+    getSearchThresholds(normalizedQuery, queryTokenCount) {
+        const qLen = normalizedQuery.length;
+        if (qLen <= 2) return { primaryThreshold: 0.62, fallbackThreshold: 0.48 };
+        if (qLen <= 4) return { primaryThreshold: 0.52, fallbackThreshold: 0.38 };
+        if (queryTokenCount >= 3) return { primaryThreshold: 0.4, fallbackThreshold: 0.29 };
+        return { primaryThreshold: 0.45, fallbackThreshold: 0.32 };
+    }
+
+    calculateRelevanceScore(song, normalizedQuery, queryTokens) {
+        const doc = this.getSongSearchDoc(song);
+        if (!doc || !normalizedQuery || queryTokens.length === 0) return 0;
+
+        const titleScore = this.scoreSearchField(doc.title, normalizedQuery, queryTokens);
+        const artistScore = this.scoreSearchField(doc.artist, normalizedQuery, queryTokens);
+        const albumScore = this.scoreSearchField(doc.album, normalizedQuery, queryTokens);
+        const fileScore = this.scoreSearchField(doc.file, normalizedQuery, queryTokens);
+        const combinedScore = this.scoreSearchField(doc.combined, normalizedQuery, queryTokens);
+
+        const weightedScore =
+            (titleScore * 0.5) +
+            (artistScore * 0.24) +
+            (albumScore * 0.16) +
+            (fileScore * 0.1);
+
+        const crossFieldCoverage = this.scoreQueryCoverage(queryTokens, doc.combined.tokens);
+        let score = Math.max(weightedScore, combinedScore * 0.92);
+        score = Math.max(score, (combinedScore * 0.82) + (crossFieldCoverage * 0.18));
+
+        if (titleScore >= 0.98) score = Math.max(score, 0.995);
+        else if (titleScore >= 0.92) score = Math.max(score, Math.min(1, score + 0.05));
+
+        return Math.max(0, Math.min(1, score));
+    }
+
+    scoreSearchField(field, normalizedQuery, queryTokens) {
+        if (!field || !field.text) return 0;
+        const text = field.text;
+
+        if (text === normalizedQuery) return 1;
+        if (text.startsWith(normalizedQuery)) return 0.97;
+
+        let score = 0;
+        if (text.includes(normalizedQuery)) score = Math.max(score, 0.9);
+
+        const coverage = this.scoreQueryCoverage(queryTokens, field.tokens);
+        const order = this.scoreTokenOrder(queryTokens, field.tokens);
+        score = Math.max(score, (coverage * 0.84) + (order * 0.16));
+
+        return Math.max(0, Math.min(1, score));
+    }
+
+    scoreTokenOrder(queryTokens, candidateTokens) {
+        if (!queryTokens.length || !candidateTokens.length) return 0;
+
+        let matched = 0;
+        let lastIndex = -1;
+
+        for (const queryToken of queryTokens) {
+            let foundIndex = -1;
+            for (let i = lastIndex + 1; i < candidateTokens.length; i++) {
+                const candidate = candidateTokens[i];
+                if (candidate === queryToken || candidate.startsWith(queryToken)) {
+                    foundIndex = i;
+                    break;
                 }
             }
-        } else {
-            // Multi-word queries - check word combinations
-            let matchedWords = 0;
-            let exactMatches = 0;
-            
-            for (const queryWord of queryWords) {
-                let wordMatched = false;
-                for (const textWord of textWords) {
-                    if (textWord === queryWord) {
-                        exactMatches++;
-                        wordMatched = true;
-                        break;
-                    } else if (textWord.startsWith(queryWord)) {
-                        matchedWords++;
-                        wordMatched = true;
-                        break;
-                    } else if (textWord.includes(queryWord)) {
-                        matchedWords += 0.5;
-                        wordMatched = true;
-                        break;
-                    }
-                }
-                if (wordMatched) matchedWords++;
-            }
-            
-            const matchRatio = matchedWords / queryWords.length;
-            const exactRatio = exactMatches / queryWords.length;
-            
-            if (exactRatio > 0.8) return 0.9;
-            if (matchRatio > 0.8) return 0.8;
-            if (matchRatio > 0.6) return 0.7;
-            if (matchRatio > 0.4) return 0.5;
-            
-            bestScore = Math.max(bestScore, matchRatio * 0.6);
-        }
-        
-        // Fallback to fuzzy matching only if no good matches found
-        if (bestScore < 0.3) {
-            const fuzzyScore = this.jaroWinkler(text, query);
-            if (fuzzyScore > 0.8) bestScore = Math.max(bestScore, fuzzyScore * 0.4);
-        }
-        
-        return bestScore;
-    }
-    
-    jaroWinkler(s1, s2) {
-        const jaro = this.jaro(s1, s2);
-        if (jaro < 0.7) return jaro;
-        
-        let prefix = 0;
-        for (let i = 0; i < Math.min(s1.length, s2.length, 4); i++) {
-            if (s1[i] === s2[i]) prefix++;
-            else break;
-        }
-        
-        return jaro + (0.1 * prefix * (1 - jaro));
-    }
-    
-    jaro(s1, s2) {
-        if (s1 === s2) return 1.0;
-        
-        const len1 = s1.length, len2 = s2.length;
-        const matchWindow = Math.floor(Math.max(len1, len2) / 2) - 1;
-        
-        const s1Matches = new Array(len1).fill(false);
-        const s2Matches = new Array(len2).fill(false);
-        
-        let matches = 0, transpositions = 0;
-        
-        for (let i = 0; i < len1; i++) {
-            const start = Math.max(0, i - matchWindow);
-            const end = Math.min(i + matchWindow + 1, len2);
-            
-            for (let j = start; j < end; j++) {
-                if (s2Matches[j] || s1[i] !== s2[j]) continue;
-                s1Matches[i] = s2Matches[j] = true;
-                matches++;
-                break;
+            if (foundIndex !== -1) {
+                matched++;
+                lastIndex = foundIndex;
             }
         }
-        
-        if (matches === 0) return 0.0;
-        
-        let k = 0;
-        for (let i = 0; i < len1; i++) {
-            if (!s1Matches[i]) continue;
-            while (!s2Matches[k]) k++;
-            if (s1[i] !== s2[k]) transpositions++;
-            k++;
-        }
-        
-        return (matches / len1 + matches / len2 + (matches - transpositions / 2) / matches) / 3.0;
+
+        return matched / queryTokens.length;
     }
-    
-    ngramSimilarity(s1, s2, n) {
-        const ngrams1 = this.getNgrams(s1, n);
-        const ngrams2 = this.getNgrams(s2, n);
-        
-        const intersection = ngrams1.filter(gram => ngrams2.includes(gram)).length;
-        const union = new Set([...ngrams1, ...ngrams2]).size;
-        
-        return union === 0 ? 0 : intersection / union;
-    }
-    
-    getNgrams(str, n) {
-        const ngrams = [];
-        for (let i = 0; i <= str.length - n; i++) {
-            ngrams.push(str.substr(i, n));
-        }
-        return ngrams;
-    }
-    
-    wordLevelMatch(text, query) {
-        const textWords = text.split(' ');
-        const queryWords = query.split(' ');
-        
-        let totalScore = 0;
-        for (const queryWord of queryWords) {
-            let bestWordScore = 0;
-            for (const textWord of textWords) {
-                const score = Math.max(
-                    this.jaroWinkler(textWord, queryWord),
-                    textWord.includes(queryWord) ? 0.8 : 0,
-                    queryWord.includes(textWord) ? 0.7 : 0
-                );
-                bestWordScore = Math.max(bestWordScore, score);
+
+    scoreQueryCoverage(queryTokens, candidateTokens) {
+        if (!queryTokens.length || !candidateTokens.length) return 0;
+
+        let total = 0;
+        let strongMatches = 0;
+
+        for (const queryToken of queryTokens) {
+            let best = 0;
+            for (const candidateToken of candidateTokens) {
+                const similarity = this.scoreTokenSimilarity(queryToken, candidateToken);
+                if (similarity > best) best = similarity;
+                if (best >= 0.999) break;
             }
-            totalScore += bestWordScore;
+
+            total += best;
+            const strongThreshold = queryToken.length <= 3 ? 0.87 : 0.8;
+            if (best >= strongThreshold) strongMatches++;
         }
-        
-        return totalScore / queryWords.length;
+
+        const avg = total / queryTokens.length;
+        const strongRatio = strongMatches / queryTokens.length;
+        return (avg * 0.82) + (strongRatio * 0.18);
+    }
+
+    scoreTokenSimilarity(queryToken, candidateToken) {
+        if (!queryToken || !candidateToken) return 0;
+        if (queryToken === candidateToken) return 1;
+
+        const qLen = queryToken.length;
+        const cLen = candidateToken.length;
+        const lenDiff = Math.abs(qLen - cLen);
+
+        if (candidateToken.startsWith(queryToken)) {
+            return Math.max(0, 0.96 - Math.min(0.14, lenDiff * 0.03));
+        }
+        if (queryToken.startsWith(candidateToken) && cLen >= 3) {
+            return Math.max(0, 0.86 - Math.min(0.14, lenDiff * 0.04));
+        }
+        if (candidateToken.includes(queryToken)) {
+            return Math.max(0, 0.83 - Math.min(0.12, lenDiff * 0.03));
+        }
+        if (queryToken.includes(candidateToken) && cLen >= 3) {
+            return Math.max(0, 0.76 - Math.min(0.12, lenDiff * 0.03));
+        }
+
+        let best = 0;
+        const dice = this.bigramDiceSimilarity(queryToken, candidateToken);
+        if (dice >= 0.2) best = Math.max(best, dice * 0.86);
+
+        if (lenDiff <= 2 && qLen <= 16 && cLen <= 16) {
+            const maxEdits = qLen <= 4 ? 1 : (qLen <= 8 ? 2 : 3);
+            const distance = this.boundedLevenshteinDistance(queryToken, candidateToken, maxEdits + 1);
+            if (distance <= maxEdits) {
+                const editScore = 1 - (distance / Math.max(qLen, cLen));
+                best = Math.max(best, 0.58 + (editScore * 0.42));
+            }
+        }
+
+        return Math.max(0, Math.min(0.95, best));
+    }
+
+    boundedLevenshteinDistance(a, b, maxDistance = 3) {
+        if (a === b) return 0;
+        const aLen = a.length;
+        const bLen = b.length;
+        if (aLen === 0) return bLen;
+        if (bLen === 0) return aLen;
+        if (Math.abs(aLen - bLen) > maxDistance) return maxDistance + 1;
+
+        let previous = new Array(bLen + 1);
+        let current = new Array(bLen + 1);
+
+        for (let j = 0; j <= bLen; j++) previous[j] = j;
+
+        for (let i = 1; i <= aLen; i++) {
+            current[0] = i;
+            let rowMin = current[0];
+
+            for (let j = 1; j <= bLen; j++) {
+                const substitutionCost = a[i - 1] === b[j - 1] ? 0 : 1;
+                const insertion = current[j - 1] + 1;
+                const deletion = previous[j] + 1;
+                const substitution = previous[j - 1] + substitutionCost;
+                const value = Math.min(insertion, deletion, substitution);
+                current[j] = value;
+                if (value < rowMin) rowMin = value;
+            }
+
+            if (rowMin > maxDistance) return maxDistance + 1;
+            [previous, current] = [current, previous];
+        }
+
+        return previous[bLen];
+    }
+
+    bigramDiceSimilarity(a, b) {
+        const aGrams = this.buildBigrams(a);
+        const bGrams = this.buildBigrams(b);
+        if (!aGrams.length || !bGrams.length) return 0;
+
+        const counts = new Map();
+        for (const gram of aGrams) counts.set(gram, (counts.get(gram) || 0) + 1);
+
+        let intersection = 0;
+        for (const gram of bGrams) {
+            const count = counts.get(gram) || 0;
+            if (count > 0) {
+                intersection++;
+                counts.set(gram, count - 1);
+            }
+        }
+
+        return (2 * intersection) / (aGrams.length + bGrams.length);
+    }
+
+    buildBigrams(value) {
+        if (!value) return [];
+        if (value.length === 1) return [value];
+        const grams = [];
+        for (let i = 0; i < value.length - 1; i++) {
+            grams.push(value.slice(i, i + 2));
+        }
+        return grams;
+    }
+
+    displaySearchNoResults(query) {
+        const safeQuery = this.escapeHtml(query || '');
+        this.songsDiv.innerHTML = `
+            <div class="empty-library">
+                <div class="empty-icon">🔎</div>
+                <h3>No matches found</h3>
+                <p>Try title, artist, or album keywords</p>
+                ${safeQuery ? `<p class="sub-text">"${safeQuery}"</p>` : ''}
+            </div>
+        `;
     }
 
     resetSongCoverRenderQueue() {
@@ -6764,9 +7176,21 @@ class MusicPlayer {
     
     displayFilteredSongs() {
         const coverRenderToken = this.resetSongCoverRenderQueue();
-        const songsToShow = this.filteredSongs.length > 0 ? this.filteredSongs : this.songs;
+        const hasActiveLibrarySearch =
+            this.currentView !== 'download' &&
+            this.searchInput &&
+            typeof this.searchInput.value === 'string' &&
+            this.searchInput.value.trim().length > 0;
+        const filtered = Array.isArray(this.filteredSongs) ? this.filteredSongs : [];
+        const songsToShow = hasActiveLibrarySearch
+            ? filtered
+            : (filtered.length > 0 ? filtered : this.songs);
         
         if (songsToShow.length === 0) {
+            if (hasActiveLibrarySearch) {
+                this.displaySearchNoResults(this.searchInput.value.trim());
+                return;
+            }
             this.displayEmptyState();
             return;
         }
@@ -7163,8 +7587,7 @@ class MusicPlayer {
             case 'recent':
                 return [...this.songs]
                     .filter(song => song.dateAdded)
-                    .sort((a, b) => new Date(b.dateAdded) - new Date(a.dateAdded))
-                    .slice(0, 50);
+                    .sort((a, b) => new Date(b.dateAdded) - new Date(a.dateAdded));
             case 'all':
             default:
                 return this.songs;
@@ -7355,6 +7778,7 @@ class MusicPlayer {
                 themeMode: 'dark',
                 shuffleMode: false,
                 repeatMode: 'none',
+                selectedCategory: 'all',
                 resumeLastSong: true,
                 settingsActiveTab: 'playback',
                 visualizerFps: 'auto',
@@ -7371,6 +7795,7 @@ class MusicPlayer {
                 themeMode: 'dark',
                 shuffleMode: false,
                 repeatMode: 'none',
+                selectedCategory: 'all',
                 resumeLastSong: true,
                 settingsActiveTab: 'playback',
                 visualizerFps: 'auto',
@@ -7384,6 +7809,9 @@ class MusicPlayer {
         if (!this.settings.settingsActiveTab) this.settings.settingsActiveTab = 'playback';
         if (!this.settings.visualizerFps) this.settings.visualizerFps = 'auto';
         if (this.settings.lyricsVisible === undefined) this.settings.lyricsVisible = true;
+        this.currentCategory = this.normalizeCategory(this.settings.selectedCategory || this.currentCategory || 'all');
+        this.settings.selectedCategory = this.currentCategory;
+        this.updateCategorySelectionUi(this.currentCategory);
         
         this.shuffleMode = this.settings.shuffleMode;
         this.repeatMode = this.settings.repeatMode;

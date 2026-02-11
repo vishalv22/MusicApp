@@ -1,7 +1,7 @@
-const { app, BrowserWindow, ipcMain, dialog, globalShortcut } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, globalShortcut, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const http = require('http');
 const https = require('https');
 const mm = require('music-metadata');
@@ -31,6 +31,7 @@ const DAB_DEFAULT_API_URL = 'https://dabmusic.xyz';
 
 let dabProcess = null;
 let dabProcessId = 0;
+let dabActiveProcessId = null;
 
 const getDabDataDir = () => path.join(app.getPath('userData'), 'dab-downloader');
 const getDabConfigDir = () => path.join(getDabDataDir(), 'config');
@@ -328,9 +329,52 @@ const normalizeApiUrl = (value) => {
 
 const normalizeCoverUrl = (apiUrl, coverUrl) => {
     if (!coverUrl) return '';
-    if (coverUrl.startsWith('http://') || coverUrl.startsWith('https://')) return coverUrl;
-    if (coverUrl.startsWith('/')) return `${apiUrl}${coverUrl}`;
-    return coverUrl;
+    const normalized = String(coverUrl).trim().replace(/^['"]+|['"]+$/g, '');
+    if (!normalized) return '';
+    if (/^https?:\/\//i.test(normalized)) return normalized;
+    if (normalized.startsWith('/')) return `${apiUrl}${normalized}`;
+    return normalized;
+};
+
+const DOWNLOADED_MEDIA_FILE_RE = /\.(mp3|wav|ogg|m4a|flac|opus|aac|alac|aiff|wma)$/i;
+
+const getLatestMediaMtimeMs = (rootDir) => {
+    if (!rootDir || !fs.existsSync(rootDir)) return 0;
+
+    let latest = 0;
+    const stack = [rootDir];
+
+    while (stack.length) {
+        const current = stack.pop();
+        let entries = [];
+        try {
+            entries = fs.readdirSync(current, { withFileTypes: true });
+        } catch {
+            continue;
+        }
+
+        for (const entry of entries) {
+            const fullPath = path.join(current, entry.name);
+            if (entry.isDirectory()) {
+                stack.push(fullPath);
+                continue;
+            }
+            if (!entry.isFile() || !DOWNLOADED_MEDIA_FILE_RE.test(entry.name)) {
+                continue;
+            }
+
+            try {
+                const stat = fs.statSync(fullPath);
+                if (Number.isFinite(stat.mtimeMs) && stat.mtimeMs > latest) {
+                    latest = stat.mtimeMs;
+                }
+            } catch {
+                // Ignore per-file stat failures and continue scanning.
+            }
+        }
+    }
+
+    return latest;
 };
 
 const sendDabEvent = (channel, payload) => {
@@ -578,6 +622,7 @@ ipcMain.handle('dab-download-track', (event, payload) => {
 
     const config = ensureDabConfig({ apiUrl, downloadLocation });
     ensureDirectory(config.DownloadLocation);
+    const baselineMediaMtimeMs = getLatestMediaMtimeMs(config.DownloadLocation);
 
     const resolved = resolveDabBinaryPath();
     if (!resolved.found) {
@@ -595,6 +640,7 @@ ipcMain.handle('dab-download-track', (event, payload) => {
     ];
 
     const processId = ++dabProcessId;
+    dabActiveProcessId = processId;
     dabProcess = spawn(dabBinary, finalArgs, {
         cwd: getDabDataDir(),
         windowsHide: true
@@ -607,16 +653,52 @@ ipcMain.handle('dab-download-track', (event, payload) => {
         sendDabEvent('dab-log', { id: processId, source: 'stderr', message: data.toString() });
     });
     dabProcess.on('close', (code) => {
-        sendDabEvent('dab-exit', { id: processId, code });
+        const latestMediaMtimeMs = getLatestMediaMtimeMs(config.DownloadLocation);
+        const downloadedFileDetected = latestMediaMtimeMs > (baselineMediaMtimeMs + 1);
+        sendDabEvent('dab-exit', { id: processId, code, downloadedFileDetected });
+        if (dabActiveProcessId === processId) {
+            dabActiveProcessId = null;
+        }
         dabProcess = null;
     });
     dabProcess.on('error', (error) => {
         sendDabEvent('dab-log', { id: processId, source: 'stderr', message: error.message });
-        sendDabEvent('dab-exit', { id: processId, code: 1 });
+        sendDabEvent('dab-exit', { id: processId, code: 1, downloadedFileDetected: false });
+        if (dabActiveProcessId === processId) {
+            dabActiveProcessId = null;
+        }
         dabProcess = null;
     });
 
     return { ok: true, id: processId };
+});
+
+ipcMain.handle('dab-cancel-download', async (event, processId) => {
+    if (!dabProcess) {
+        return { ok: false, error: 'No active download to cancel.' };
+    }
+
+    if (processId && dabActiveProcessId && processId !== dabActiveProcessId) {
+        return { ok: false, error: 'Download process is no longer active.' };
+    }
+
+    try {
+        const pid = dabProcess.pid;
+        if (process.platform === 'win32' && Number.isInteger(pid) && pid > 0) {
+            const result = spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+                windowsHide: true
+            });
+            if (result.error && !dabProcess.killed) {
+                dabProcess.kill('SIGTERM');
+            }
+        } else {
+            dabProcess.kill('SIGTERM');
+        }
+        return { ok: true };
+    } catch (error) {
+        console.error('Failed to cancel DAB download:', error);
+        return { ok: false, error: 'Failed to cancel active download.' };
+    }
 });
 
 // Helper functions for manual attachments
@@ -669,6 +751,83 @@ const saveWatchedFolders = (folders) => {
     }
 };
 
+const moveToTrashIfExists = async (targetPath) => {
+    if (!targetPath || typeof targetPath !== 'string') return false;
+    const normalizedPath = path.normalize(targetPath);
+    if (!fs.existsSync(normalizedPath)) return false;
+    await shell.trashItem(normalizedPath);
+    return true;
+};
+
+const toPathKey = (targetPath) => {
+    const normalizedPath = path.normalize(targetPath);
+    return process.platform === 'win32' ? normalizedPath.toLowerCase() : normalizedPath;
+};
+
+const sanitizeBaseName = (value) => {
+    if (typeof value !== 'string') return '';
+    return path.basename(value).trim();
+};
+
+const getVideoAttachmentsPath = () => path.join(getUserDataPath(), 'video-attachments.json');
+
+const loadVideoAttachments = () => {
+    const attachmentsPath = getVideoAttachmentsPath();
+    if (!fs.existsSync(attachmentsPath)) return {};
+    try {
+        return JSON.parse(fs.readFileSync(attachmentsPath, 'utf8'));
+    } catch (error) {
+        console.error('Error loading video attachments:', error);
+        return {};
+    }
+};
+
+const saveVideoAttachments = (attachments) => {
+    const attachmentsPath = getVideoAttachmentsPath();
+    try {
+        fs.writeFileSync(attachmentsPath, JSON.stringify(attachments, null, 2));
+    } catch (error) {
+        console.error('Error saving video attachments:', error);
+    }
+};
+
+const getLyricsCandidatePaths = (baseName, manualAttachments) => {
+    const safeBaseName = sanitizeBaseName(baseName);
+    if (!safeBaseName) return [];
+
+    const mappedBaseName = sanitizeBaseName(manualAttachments[safeBaseName] || '');
+    const candidateNames = Array.from(new Set([mappedBaseName, safeBaseName].filter(Boolean)));
+    return candidateNames.map(name => path.join(getUserDataPath(), 'lyrics', `${name}.lrc`));
+};
+
+const removeLyricsForSongBaseName = async (baseName) => {
+    const safeBaseName = sanitizeBaseName(baseName);
+    if (!safeBaseName) return;
+
+    const manualAttachments = loadManualAttachments();
+    const candidatePaths = getLyricsCandidatePaths(safeBaseName, manualAttachments);
+    for (const lyricsPath of candidatePaths) {
+        await moveToTrashIfExists(lyricsPath);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(manualAttachments, safeBaseName)) {
+        delete manualAttachments[safeBaseName];
+        saveManualAttachments(manualAttachments);
+    }
+};
+
+const removeAttachedVideoForSongBaseName = async (baseName) => {
+    const safeBaseName = sanitizeBaseName(baseName);
+    if (!safeBaseName) return;
+
+    const attachments = loadVideoAttachments();
+    if (!attachments[safeBaseName]) return;
+
+    await moveToTrashIfExists(attachments[safeBaseName].videoPath);
+    delete attachments[safeBaseName];
+    saveVideoAttachments(attachments);
+};
+
 const scanFolderRecursively = (folderPath) => {
     const files = [];
     try {
@@ -702,6 +861,16 @@ ipcMain.handle('get-music-files', async () => {
             allFiles.push(...files);
         }
     }
+
+    // De-duplicate files when watched folders overlap (e.g. parent + child folders).
+    const dedupedFilePaths = [];
+    const seenFilePaths = new Set();
+    for (const filePath of allFiles) {
+        const key = toPathKey(filePath);
+        if (seenFilePaths.has(key)) continue;
+        seenFilePaths.add(key);
+        dedupedFilePaths.push(filePath);
+    }
     
     // Load existing file timestamps
     const timestampsPath = path.join(getUserDataPath(), 'file-timestamps.json');
@@ -716,7 +885,7 @@ ipcMain.handle('get-music-files', async () => {
     
     const musicFiles = [];
     
-    for (const filePath of allFiles) {
+    for (const filePath of dedupedFilePaths) {
         const file = path.basename(filePath);
         try {
             const metadata = await mm.parseFile(filePath);
@@ -1130,17 +1299,8 @@ ipcMain.handle('add-song-lyrics', async (event, baseName, lyricsPath) => {
 });
 
 ipcMain.handle('remove-lyrics', async (event, baseName) => {
-    const lyricsPath = path.join(getUserDataPath(), 'lyrics', `${baseName}.lrc`);
     try {
-        if (fs.existsSync(lyricsPath)) {
-            fs.unlinkSync(lyricsPath);
-        }
-        
-        // Remove manual attachment record
-        const manualAttachments = loadManualAttachments();
-        const { [baseName]: removed, ...updatedAttachments } = manualAttachments;
-        saveManualAttachments(updatedAttachments);
-        
+        await removeLyricsForSongBaseName(baseName);
         return true;
     } catch (error) {
         console.error('Error removing lyrics:', error);
@@ -1148,12 +1308,51 @@ ipcMain.handle('remove-lyrics', async (event, baseName) => {
     }
 });
 
-ipcMain.handle('delete-song', async (event, fileName) => {
-    const musicPath = path.join(getUserDataPath(), 'music', fileName);
+ipcMain.handle('delete-song', async (event, payload) => {
     try {
-        if (fs.existsSync(musicPath)) {
-            fs.unlinkSync(musicPath);
+        const candidatePaths = [];
+        let payloadBaseName = '';
+        let payloadIsVideo = false;
+
+        if (typeof payload === 'string' && payload.trim()) {
+            if (path.isAbsolute(payload)) {
+                candidatePaths.push(payload);
+            }
+            candidatePaths.push(path.join(getUserDataPath(), 'music', path.basename(payload)));
+        } else if (payload && typeof payload === 'object') {
+            if (typeof payload.filePath === 'string' && payload.filePath.trim()) {
+                candidatePaths.push(payload.filePath);
+            }
+            if (typeof payload.fileName === 'string' && payload.fileName.trim()) {
+                candidatePaths.push(path.join(getUserDataPath(), 'music', path.basename(payload.fileName)));
+            }
+            if (typeof payload.baseName === 'string' && payload.baseName.trim()) {
+                payloadBaseName = payload.baseName;
+            }
+            payloadIsVideo = payload.isVideo === true;
         }
+
+        const uniquePaths = [];
+        const seenPathKeys = new Set();
+        for (const candidatePath of candidatePaths) {
+            const normalizedPath = path.normalize(candidatePath);
+            const key = toPathKey(normalizedPath);
+            if (seenPathKeys.has(key)) continue;
+            seenPathKeys.add(key);
+            uniquePaths.push(normalizedPath);
+        }
+
+        const targetPath = uniquePaths.find(targetPath => fs.existsSync(targetPath));
+        if (!targetPath) return false;
+
+        await shell.trashItem(targetPath);
+
+        const songBaseName = sanitizeBaseName(payloadBaseName) || sanitizeBaseName(path.parse(path.basename(targetPath)).name);
+        if (songBaseName && !payloadIsVideo) {
+            await removeLyricsForSongBaseName(songBaseName);
+            await removeAttachedVideoForSongBaseName(songBaseName);
+        }
+
         return true;
     } catch (error) {
         console.error('Error deleting song:', error);
@@ -1325,28 +1524,8 @@ ipcMain.handle('browse-image-file', async () => {
 
 // Remove attached video
 ipcMain.handle('remove-attached-video', async (event, songBaseName) => {
-    const attachmentsPath = path.join(getUserDataPath(), 'video-attachments.json');
-    
-    if (!fs.existsSync(attachmentsPath)) {
-        return true;
-    }
-    
     try {
-        const attachments = JSON.parse(fs.readFileSync(attachmentsPath, 'utf8'));
-        
-        if (attachments[songBaseName]) {
-            const videoPath = attachments[songBaseName].videoPath;
-            
-            // Delete video file if it exists
-            if (fs.existsSync(videoPath)) {
-                fs.unlinkSync(videoPath);
-            }
-            
-            // Remove from attachments record
-            delete attachments[songBaseName];
-            fs.writeFileSync(attachmentsPath, JSON.stringify(attachments, null, 2));
-        }
-        
+        await removeAttachedVideoForSongBaseName(songBaseName);
         return true;
     } catch (error) {
         console.error('Error removing attached video:', error);

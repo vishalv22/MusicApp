@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ViMusic Beta</title>
     <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="playlistView.css">
 </head>
 <body>
     <div class="titlebar">
@@ -487,9 +488,7 @@
                                 <button class="download-tab" data-type="artist">Artists</button>
                             </div>
                         </div>
-                        <div class="download-results-status" id="downloadResultsStatus">
-                            Use the top search bar and press Enter.
-                        </div>
+                        <div class="download-results-status" id="downloadResultsStatus"></div>
                         <div id="downloadResults" class="download-results"></div>
                         <div class="download-logs-panel" id="downloadLogsPanel" style="display: none;">
                         <div class="download-logs-header">
@@ -506,18 +505,27 @@
                 </div>
             </div>
             <div class="playlist-details-panel" id="playlistDetailsPanel" style="display: none;">
-                <img src="icons/edit.png" class="playlist-bg-edit-icon" id="playlistBgEditIcon" title="Change background image">
-                <div class="playlist-info">
+                <section class="playlist-view" id="playlistView" aria-label="Playlist Header">
+                    <div class="playlist-view-bg" aria-hidden="true"></div>
+                    <div class="playlist-view-bg-overlay" aria-hidden="true"></div>
+                    <div class="playlist-collapsed-strip" aria-hidden="true">
+                        <div class="playlist-collapsed-strip-bg"></div>
+                        <div class="playlist-collapsed-strip-overlay"></div>
+                    </div>
+
+                    <img src="icons/edit.png" class="playlist-bg-edit-icon" id="playlistBgEditIcon" title="Change background image">
+
+                    <div class="playlist-info">
                         <div class="playlist-cover" id="playlistCover">
-                            <img src="icons/playlist.png" class="playlist-cover-img">
+                            <img src="icons/default-playlist.png" class="playlist-cover-img" alt="Playlist cover">
                             <div class="playlist-cover-overlay">
-                                <img src="icons/edit.png" class="playlist-edit-icon">
+                                <img src="icons/edit.png" class="playlist-edit-icon" alt="">
                             </div>
                         </div>
                         <div class="playlist-meta">
                             <div class="playlist-title-container">
                                 <h2 class="playlist-title" id="playlistTitle">Playlist Name</h2>
-                                <img src="icons/edit.png" class="playlist-edit-name-icon" id="playlistEditIcon" title="Edit playlist name">
+                                <img src="icons/edit.png" class="playlist-edit-name-icon" id="playlistEditIcon" title="Edit playlist name" alt="">
                                 <input type="text" class="playlist-title-input" id="playlistTitleInput" style="display: none;">
                             </div>
                             <div class="playlist-meta-line" id="playlistMetaLine"></div>
@@ -525,6 +533,7 @@
                             <p class="playlist-description" id="playlistDescription">No description</p>
                         </div>
                     </div>
+                </section>
                 </div>
                 <div class="music-container" id="musicContainer">
                     <div class="music-header">
@@ -750,6 +759,7 @@
 
 
     <script src="visualizer.js"></script>
+    <script src="playlistView.js"></script>
     <script src="app.js"></script>
 </body>
 </html>
