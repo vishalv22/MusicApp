@@ -108,6 +108,26 @@ class MusicPlayer {
         this.songCoverRenderRafId = 0;
         this.songCoverRenderIdleId = null;
         this.songCoverRenderScheduled = false;
+        this.songCoverUrlCache = new Map();
+        this.songCoverCacheLimit = 600;
+
+        this.virtualSongListEnabled = false;
+        this.virtualSongListState = {
+            songs: [],
+            coverRenderToken: 0,
+            rowHeight: 0,
+            overscan: 16,
+            startIndex: 0,
+            endIndex: 0,
+            scrollRafId: 0,
+            resizeRafId: 0,
+            forceRender: false,
+            topSpacer: null,
+            bottomSpacer: null,
+            itemsHost: null
+        };
+        this.songListDelegationReady = false;
+        this.listStarClickState = new Map();
 
         // Media Session / SMTC integration
         this.mediaSessionEnabled = false;
@@ -742,6 +762,8 @@ class MusicPlayer {
         this.setupPlayerBarSizing();
         this.setupScrollbarTimeout();
         this.setupScrollPerformanceHints();
+        this.setupVirtualSongList();
+        this.setupSongListInteractions();
         this.setupSettings();
         this.setupSongContextMenuDelegation();
         this.loadSettings();
@@ -756,6 +778,8 @@ class MusicPlayer {
         if (this.selectionMode || this.selectedSongs.size > 0) {
             this.disableSelectionMode();
         }
+        this.clearSongCoverUrlCache();
+        this.resetVirtualSongListState();
         this.musicList.innerHTML = '<div id="songs"></div>';
         this.songsDiv = document.getElementById('songs');
         
@@ -889,6 +913,7 @@ class MusicPlayer {
         if (songIndex === this.currentSongIndex) {
             this.updateCurrentSongRating();
         }
+        this.updateVisibleSongRating(songIndex);
     }
     
     saveRatings() {
@@ -915,6 +940,7 @@ class MusicPlayer {
     
     displayEmptyState() {
         this.resetSongCoverRenderQueue();
+        this.resetVirtualSongListState();
         this.songsDiv.innerHTML = `
             <div class="empty-library">
                 <div class="empty-icon">📁</div>
@@ -931,6 +957,7 @@ class MusicPlayer {
 
     displayContextEmptyState() {
         this.resetSongCoverRenderQueue();
+        this.resetVirtualSongListState();
         if (this.currentPlaylist) {
             this.songsDiv.innerHTML = `
                 <div class="empty-library">
@@ -1024,10 +1051,8 @@ class MusicPlayer {
         this.settings.lastSongName = song.name;
         this.saveSettings();
         
-        // Update UI
-        document.querySelectorAll('.song-item').forEach((item, i) => {
-            item.classList.toggle('active', i === index);
-        });
+        // Update visible list state (virtualized lists only render a window of rows).
+        this.updateRenderedSongActiveState(index);
         
         // Stop any playing video to prevent dual audio
         this.suppressAutoResume();
@@ -7275,6 +7300,7 @@ class MusicPlayer {
 
     displaySearchNoResults(query) {
         this.resetSongCoverRenderQueue();
+        this.resetVirtualSongListState();
         const safeQuery = this.escapeHtml(query || '');
         this.songsDiv.innerHTML = `
             <div class="empty-library">
@@ -7299,6 +7325,10 @@ class MusicPlayer {
             cancelIdleCallback(this.songCoverRenderIdleId);
         }
         this.songCoverRenderIdleId = null;
+        this.listStarClickState.forEach((state) => {
+            if (state?.timerId) clearTimeout(state.timerId);
+        });
+        this.listStarClickState.clear();
 
         return this.songCoverRenderToken;
     }
@@ -7307,79 +7337,76 @@ class MusicPlayer {
         return token === this.songCoverRenderToken;
     }
 
-    scheduleSongCoverRenderQueue() {
-        if (this.songCoverRenderScheduled) return;
-        this.songCoverRenderScheduled = true;
-
-        const pump = (deadline) => {
-            this.songCoverRenderScheduled = false;
-            this.songCoverRenderRafId = 0;
-            this.songCoverRenderIdleId = null;
-            this.pumpSongCoverRenderQueue(deadline);
-            if (this.songCoverRenderQueue.length > 0) {
-                this.scheduleSongCoverRenderQueue();
-            }
-        };
-
-        if (window.requestIdleCallback) {
-            this.songCoverRenderIdleId = requestIdleCallback(pump, { timeout: 120 });
-            return;
-        }
-
-        this.songCoverRenderRafId = requestAnimationFrame(() => pump());
-    }
-
-    pumpSongCoverRenderQueue(deadline) {
-        const maxPerPump = 8;
-        let processed = 0;
-
-        while (this.songCoverRenderQueue.length > 0 && processed < maxPerPump) {
-            if (
-                deadline &&
-                typeof deadline.timeRemaining === 'function' &&
-                deadline.timeRemaining() < 1 &&
-                processed > 0
-            ) {
-                break;
-            }
-
-            const task = this.songCoverRenderQueue.shift();
-            if (!task) continue;
-
-            const { coverDiv, picture, token } = task;
-            if (!this.isSongCoverRenderTokenCurrent(token)) continue;
-            if (!coverDiv || !coverDiv.isConnected) continue;
-
-            let url = null;
+    clearSongCoverUrlCache() {
+        if (!this.songCoverUrlCache || this.songCoverUrlCache.size === 0) return;
+        this.songCoverUrlCache.forEach((entry) => {
+            if (!entry?.url) return;
             try {
-                url = URL.createObjectURL(new Blob([picture]));
+                URL.revokeObjectURL(entry.url);
             } catch {
-                continue;
+                // Ignore revoke errors from stale/invalid URLs.
             }
+        });
+        this.songCoverUrlCache.clear();
+    }
 
-            const img = document.createElement('img');
-            img.alt = 'Cover';
-            const releaseUrl = () => {
-                if (!url) return;
-                URL.revokeObjectURL(url);
-                url = null;
-            };
-            img.onload = releaseUrl;
-            img.onerror = releaseUrl;
+    trimSongCoverUrlCache() {
+        const cache = this.songCoverUrlCache;
+        if (!cache || cache.size <= this.songCoverCacheLimit) return;
 
-            coverDiv.innerHTML = '';
-            coverDiv.appendChild(img);
-            img.src = url;
-
-            processed++;
+        const pruneTarget = Math.max(0, cache.size - this.songCoverCacheLimit);
+        let removed = 0;
+        for (const [song, entry] of cache) {
+            if (entry?.url) {
+                try {
+                    URL.revokeObjectURL(entry.url);
+                } catch {
+                    // Ignore revoke errors from stale/invalid URLs.
+                }
+            }
+            cache.delete(song);
+            removed++;
+            if (removed >= pruneTarget) break;
         }
     }
 
-    queueSongCoverRender(coverDiv, picture, token) {
-        if (!coverDiv || !picture) return;
+    getSongCoverUrl(song) {
+        if (!song?.picture) return null;
+        if (!this.songCoverUrlCache) this.songCoverUrlCache = new Map();
+
+        const cached = this.songCoverUrlCache.get(song);
+        if (cached?.url) {
+            this.songCoverUrlCache.delete(song);
+            this.songCoverUrlCache.set(song, cached);
+            return cached.url;
+        }
+
+        let url = null;
+        try {
+            url = URL.createObjectURL(new Blob([song.picture]));
+        } catch {
+            return null;
+        }
+
+        this.songCoverUrlCache.set(song, { url });
+        this.trimSongCoverUrlCache();
+        return url;
+    }
+
+    queueSongCoverRender(coverDiv, song, token) {
+        if (!coverDiv || !song?.picture) return;
         if (!this.isSongCoverRenderTokenCurrent(token)) return;
-        this.songCoverRenderQueue.push({ coverDiv, picture, token });
-        this.scheduleSongCoverRenderQueue();
+
+        const url = this.getSongCoverUrl(song);
+        if (!url) return;
+
+        const img = document.createElement('img');
+        img.alt = 'Cover';
+        img.decoding = 'async';
+        img.loading = 'eager';
+        img.src = url;
+        coverDiv.innerHTML = '';
+        coverDiv.appendChild(img);
     }
     
     displayFilteredSongs() {
@@ -7400,159 +7427,499 @@ class MusicPlayer {
             return;
         }
         
-        // Clear and show loading
         this.cachedSongItems = null;
-        this.songsDiv.innerHTML = '<div class="loading">Loading songs...</div>';
-        
-        // Use requestIdleCallback for better performance
-        const renderCallback = () => this.renderSongsBatch(songsToShow, 0, coverRenderToken);
-        if (window.requestIdleCallback) {
-            requestIdleCallback(renderCallback);
-        } else {
-            requestAnimationFrame(renderCallback);
+        if (this.virtualSongListEnabled) {
+            this.renderVirtualSongList(songsToShow, coverRenderToken);
+            return;
         }
+        this.renderSongListWithoutVirtualization(songsToShow, coverRenderToken);
     }
-    
-    renderSongsBatch(songsToShow, startIndex, coverRenderToken = this.songCoverRenderToken) {
+
+    renderSongListWithoutVirtualization(songsToShow, coverRenderToken = this.songCoverRenderToken) {
         if (!this.isSongCoverRenderTokenCurrent(coverRenderToken)) return;
-        const batchSize = 200; // Larger batch for playlists
-        const endIndex = Math.min(startIndex + batchSize, songsToShow.length);
-        
-        if (startIndex === 0) {
-            if (!this.isSongCoverRenderTokenCurrent(coverRenderToken)) return;
-            this.songsDiv.innerHTML = '';
-            this.selectionAnchorDisplayIndex = null;
-        }
-        
+        if (!this.songsDiv) return;
+
+        this.resetVirtualSongListState();
+        this.songsDiv.innerHTML = '';
+        this.selectionAnchorDisplayIndex = null;
+
         const fragment = document.createDocumentFragment();
-        
-        for (let i = startIndex; i < endIndex; i++) {
+        for (let i = 0; i < songsToShow.length; i++) {
             if (!this.isSongCoverRenderTokenCurrent(coverRenderToken)) return;
             const song = songsToShow[i];
-            const originalIndex = this.getSongIndexForSong(song);
-            if (!Number.isInteger(originalIndex) || originalIndex < 0) continue;
-             
-            const div = document.createElement('div');
-            div.className = 'song-item';
-            if (originalIndex === this.currentSongIndex) div.classList.add('active');
-            div.dataset.songIndex = `${originalIndex}`;
-            div.dataset.displayIndex = `${i}`;
-            if (this.selectedSongs.has(originalIndex)) div.classList.add('selected');
-            
-            const genreValue = Array.isArray(song.genre) ? song.genre[0] : song.genre;
-            const rawDate = song.releaseDate || song.year || song.date || song.dateAdded;
-            const dateValue = rawDate ? this.formatReleaseDate(rawDate) : '';
-            const durationValue = song.duration ? this.formatDuration(song.duration) : '';
-            const metaItems = [];
-            if (genreValue) metaItems.push(this.escapeHtml(genreValue));
-            if (dateValue) metaItems.push(this.escapeHtml(dateValue));
-            if (durationValue) metaItems.push(this.escapeHtml(durationValue));
-            const metaHtml = metaItems.length
-                ? `<span class="song-meta-sep">•</span>${metaItems.map(item => `<span class="song-meta-item">${item}</span>`).join('<span class="song-meta-sep">•</span>')}`
-                : '';
-              
-            // Defer image loading for faster initial render
-            div.innerHTML = `
-                <div class="song-checkbox">
-                    <label class="song-select-wrap" title="Select song">
-                        <input type="checkbox" class="song-select" data-song-index="${originalIndex}" ${this.selectedSongs.has(originalIndex) ? 'checked' : ''} aria-label="Select song">
-                        <span class="song-check" aria-hidden="true"></span>
-                    </label>
-                </div>
-                <div class="song-number">${i + 1}</div>
-                <div class="song-cover">
-                    <div class="cover-placeholder">🎵</div>
-                </div>
-                <div class="song-info-item">
-                    <div class="song-name">${this.escapeHtml(song.title)}${this.getSongDetailDotHtml(song)}</div>
-                    <div class="song-meta-line">
-                        <span class="song-artist"><img src="icons/user.svg" alt="">${this.escapeHtml(song.artist)}</span>
-                        ${metaHtml}
-                    </div>
-                </div>
-                <div class="star-rating" data-song-index="${originalIndex}">
-                    ${this.generateStars(song.rating || 0)}
-                </div>
-                <span class="quality-indicator">${this.getQualityIndicatorHtml(song)}</span>
-            `;
-            
-            // Load cover image asynchronously
-            if (song.picture) {
-                const coverDiv = div.querySelector('.song-cover');
-                if (coverDiv) {
-                    this.queueSongCoverRender(coverDiv, song.picture, coverRenderToken);
-                }
-            }
-             
-            div.onclick = (e) => {
-                if (e.target.closest('.song-checkbox')) return;
-                if (e.target.classList.contains('star') || e.target.closest('.star-rating')) return;
-
-                if (this.isVisualizerViewActive) this.disableVisualizerView(true);
-
-                if (this.selectionMode) {
-                    const hasAnchor = Number.isInteger(this.selectionAnchorDisplayIndex);
-                    if (e.shiftKey && hasAnchor) {
-                        if (!e.ctrlKey && !e.metaKey) this.selectedSongs.clear();
-                        this.selectRangeInList(this.selectionAnchorDisplayIndex, i, songsToShow);
-                    } else if (this.selectedSongs.has(originalIndex)) {
-                        this.selectedSongs.delete(originalIndex);
-                    } else {
-                        this.selectedSongs.add(originalIndex);
-                    }
-
-                    this.selectionAnchorDisplayIndex = i;
-                    this.syncSelectionDom();
-                    this.updateSelectionUI();
-                    return;
-                }
-
-                // Normal mode, play the song
-                this.setPlaybackContextFromBrowseContext();
-                this.selectSong(originalIndex);
-            };
-              
-            // Handle checkbox selection
-            const checkbox = div.querySelector('.song-select');
-            checkbox.onchange = (e) => {
-                e.stopPropagation();
-
-                if (!this.selectionMode) {
-                    this.enableSelectionMode(originalIndex, { keepExisting: false, showNotification: false, hideMenu: false });
-                }
-
-                const checked = !!e.target.checked;
-                if (checked) {
-                    this.selectedSongs.add(originalIndex);
-                } else {
-                    this.selectedSongs.delete(originalIndex);
-                }
-
-                div.classList.toggle('selected', checked);
-                this.selectionAnchorDisplayIndex = i;
-                this.updateSelectionUI();
-            };
-            
-            div.oncontextmenu = (e) => {
-                e.preventDefault();
-                this.showSongContextMenu(e.clientX, e.clientY, originalIndex);
-            };
-            
-            this.addStarEventListeners(div, originalIndex);
-            fragment.appendChild(div);
+            const row = this.buildSongItemElement(song, i, coverRenderToken);
+            if (row) fragment.appendChild(row);
         }
-
-        if (!this.isSongCoverRenderTokenCurrent(coverRenderToken)) return;
-        
         this.songsDiv.appendChild(fragment);
         this.updateSelectionHeaderState();
-        
-        if (endIndex < songsToShow.length) {
-            requestAnimationFrame(() => {
-                if (!this.isSongCoverRenderTokenCurrent(coverRenderToken)) return;
-                this.renderSongsBatch(songsToShow, endIndex, coverRenderToken);
-            });
+    }
+
+    resetVirtualSongListState() {
+        const state = this.virtualSongListState;
+        if (!state) return;
+
+        if (state.scrollRafId) {
+            cancelAnimationFrame(state.scrollRafId);
+            state.scrollRafId = 0;
         }
+        if (state.resizeRafId) {
+            cancelAnimationFrame(state.resizeRafId);
+            state.resizeRafId = 0;
+        }
+        state.forceRender = false;
+        state.songs = [];
+        state.startIndex = 0;
+        state.endIndex = 0;
+        state.topSpacer = null;
+        state.bottomSpacer = null;
+        state.itemsHost = null;
+    }
+
+    setupVirtualSongList() {
+        if (!this.virtualSongListEnabled || !this.musicList || this.virtualSongListReady) return;
+        this.virtualSongListReady = true;
+
+        this.musicList.addEventListener('scroll', () => {
+            this.scheduleVirtualSongViewportRender();
+        }, { passive: true });
+
+        window.addEventListener('resize', () => {
+            const state = this.virtualSongListState;
+            if (state.resizeRafId) cancelAnimationFrame(state.resizeRafId);
+            state.resizeRafId = requestAnimationFrame(() => {
+                state.resizeRafId = 0;
+                state.rowHeight = 0;
+                this.scheduleVirtualSongViewportRender(true);
+            });
+        });
+    }
+
+    ensureVirtualSongListStructure() {
+        const state = this.virtualSongListState;
+        if (!this.songsDiv) return false;
+
+        if (
+            state.topSpacer &&
+            state.bottomSpacer &&
+            state.itemsHost &&
+            state.topSpacer.parentElement === this.songsDiv &&
+            state.bottomSpacer.parentElement === this.songsDiv &&
+            state.itemsHost.parentElement === this.songsDiv
+        ) {
+            return true;
+        }
+
+        this.songsDiv.innerHTML = '';
+        const topSpacer = document.createElement('div');
+        topSpacer.className = 'songs-virtual-spacer songs-virtual-spacer-top';
+
+        const itemsHost = document.createElement('div');
+        itemsHost.className = 'songs-virtual-items';
+
+        const bottomSpacer = document.createElement('div');
+        bottomSpacer.className = 'songs-virtual-spacer songs-virtual-spacer-bottom';
+
+        this.songsDiv.appendChild(topSpacer);
+        this.songsDiv.appendChild(itemsHost);
+        this.songsDiv.appendChild(bottomSpacer);
+
+        state.topSpacer = topSpacer;
+        state.itemsHost = itemsHost;
+        state.bottomSpacer = bottomSpacer;
+
+        return true;
+    }
+
+    measureVirtualSongRowHeight(songsToShow, coverRenderToken) {
+        const state = this.virtualSongListState;
+        if (!Array.isArray(songsToShow) || songsToShow.length === 0) return state.rowHeight || 86;
+
+        const sampleSong = songsToShow[0];
+        if (!sampleSong || !this.songsDiv) return state.rowHeight || 86;
+
+        const probe = this.buildSongItemElement(sampleSong, 0, coverRenderToken, { skipCover: true });
+        if (!probe) return state.rowHeight || 86;
+
+        probe.classList.add('song-item-probe');
+        probe.style.visibility = 'hidden';
+        probe.style.pointerEvents = 'none';
+        probe.style.position = 'absolute';
+        probe.style.left = '0';
+        probe.style.right = '0';
+        const probeHost = this.virtualSongListState?.itemsHost || this.songsDiv;
+        probeHost.appendChild(probe);
+
+        const computed = window.getComputedStyle(probe);
+        const marginTop = parseFloat(computed.marginTop) || 0;
+        const marginBottom = parseFloat(computed.marginBottom) || 0;
+        const measured = probe.getBoundingClientRect().height + marginTop + marginBottom;
+        probe.remove();
+
+        if (Number.isFinite(measured) && measured > 32) {
+            state.rowHeight = Math.round(measured);
+        } else if (!Number.isFinite(state.rowHeight) || state.rowHeight <= 0) {
+            state.rowHeight = 86;
+        }
+
+        return state.rowHeight;
+    }
+
+    renderVirtualSongList(songsToShow, coverRenderToken = this.songCoverRenderToken) {
+        if (!this.isSongCoverRenderTokenCurrent(coverRenderToken)) return;
+        if (!this.songsDiv) return;
+        if (!this.virtualSongListEnabled || !this.musicList) {
+            this.songsDiv.innerHTML = '<div class="error">Unable to render songs list</div>';
+            return;
+        }
+        if (!this.ensureVirtualSongListStructure()) return;
+
+        const state = this.virtualSongListState;
+        state.songs = songsToShow;
+        state.coverRenderToken = coverRenderToken;
+        state.startIndex = -1;
+        state.endIndex = -1;
+        state.forceRender = true;
+
+        if (!Number.isFinite(state.rowHeight) || state.rowHeight <= 0) {
+            state.rowHeight = 0;
+        }
+        if (state.rowHeight === 0) {
+            this.measureVirtualSongRowHeight(songsToShow, coverRenderToken);
+        }
+        if (!Number.isFinite(state.rowHeight) || state.rowHeight <= 0) {
+            state.rowHeight = 86;
+        }
+
+        const estimatedHeight = songsToShow.length * state.rowHeight;
+        const maxScrollTop = Math.max(0, estimatedHeight - (this.musicList.clientHeight || 0));
+        if (this.musicList.scrollTop > maxScrollTop) {
+            this.musicList.scrollTop = maxScrollTop;
+        }
+
+        this.renderVirtualSongViewport(true);
+    }
+
+    scheduleVirtualSongViewportRender(force = false) {
+        const state = this.virtualSongListState;
+        if (!state || !Array.isArray(state.songs) || state.songs.length === 0) return;
+        if (force) state.forceRender = true;
+        if (state.scrollRafId) return;
+
+        state.scrollRafId = requestAnimationFrame(() => {
+            state.scrollRafId = 0;
+            const shouldForce = !!state.forceRender;
+            state.forceRender = false;
+            this.renderVirtualSongViewport(shouldForce);
+        });
+    }
+
+    renderVirtualSongViewport(force = false) {
+        const state = this.virtualSongListState;
+        if (!state || !this.musicList || !state.itemsHost || !state.topSpacer || !state.bottomSpacer) return;
+        if (!Array.isArray(state.songs) || state.songs.length === 0) {
+            state.itemsHost.innerHTML = '';
+            state.topSpacer.style.height = '0px';
+            state.bottomSpacer.style.height = '0px';
+            return;
+        }
+        if (!this.isSongCoverRenderTokenCurrent(state.coverRenderToken)) return;
+
+        const total = state.songs.length;
+        if (!Number.isFinite(state.rowHeight) || state.rowHeight <= 0) {
+            this.measureVirtualSongRowHeight(state.songs, state.coverRenderToken);
+        }
+        const rowHeight = Number.isFinite(state.rowHeight) && state.rowHeight > 0 ? state.rowHeight : 86;
+        const viewportHeight = Math.max(this.musicList.clientHeight || 0, rowHeight);
+        const overscan = Math.max(8, state.overscan || 0);
+        const scrollTop = Math.max(0, this.musicList.scrollTop || 0);
+        const firstVisible = Math.floor(scrollTop / rowHeight);
+        const visibleCount = Math.ceil(viewportHeight / rowHeight) + (overscan * 2);
+        const maxStart = Math.max(0, total - visibleCount);
+        const startIndex = Math.min(Math.max(0, firstVisible - overscan), maxStart);
+        const endIndex = Math.min(total, startIndex + visibleCount);
+
+        if (!force && startIndex === state.startIndex && endIndex === state.endIndex) return;
+
+        state.startIndex = startIndex;
+        state.endIndex = endIndex;
+
+        state.topSpacer.style.height = `${startIndex * rowHeight}px`;
+        state.bottomSpacer.style.height = `${Math.max(0, (total - endIndex) * rowHeight)}px`;
+
+        const fragment = document.createDocumentFragment();
+        for (let i = startIndex; i < endIndex; i++) {
+            if (!this.isSongCoverRenderTokenCurrent(state.coverRenderToken)) return;
+            const song = state.songs[i];
+            const row = this.buildSongItemElement(song, i, state.coverRenderToken);
+            if (row) fragment.appendChild(row);
+        }
+        state.itemsHost.replaceChildren(fragment);
+        this.updateSelectionHeaderState();
+    }
+
+    buildSongItemElement(song, displayIndex, coverRenderToken = this.songCoverRenderToken, options = {}) {
+        const { skipCover = false } = options;
+        if (!song) return null;
+
+        const originalIndex = this.getSongIndexForSong(song);
+        if (!Number.isInteger(originalIndex) || originalIndex < 0) return null;
+
+        const div = document.createElement('div');
+        div.className = 'song-item';
+        if (originalIndex === this.currentSongIndex) div.classList.add('active');
+        if (this.selectedSongs.has(originalIndex)) div.classList.add('selected');
+        div.dataset.songIndex = `${originalIndex}`;
+        div.dataset.displayIndex = `${displayIndex}`;
+
+        const genreValue = Array.isArray(song.genre) ? song.genre[0] : song.genre;
+        const rawDate = song.releaseDate || song.year || song.date || song.dateAdded;
+        const dateValue = rawDate ? this.formatReleaseDate(rawDate) : '';
+        const durationValue = song.duration ? this.formatDuration(song.duration) : '';
+        const metaItems = [];
+        if (genreValue) metaItems.push(this.escapeHtml(genreValue));
+        if (dateValue) metaItems.push(this.escapeHtml(dateValue));
+        if (durationValue) metaItems.push(this.escapeHtml(durationValue));
+        const metaHtml = metaItems.length
+            ? `<span class="song-meta-sep">•</span>${metaItems.map(item => `<span class="song-meta-item">${item}</span>`).join('<span class="song-meta-sep">•</span>')}`
+            : '';
+        const titleValue = this.escapeHtml(song.title || song.name || 'Unknown title');
+        const artistValue = this.escapeHtml(song.artist || 'Unknown artist');
+
+        div.innerHTML = `
+            <div class="song-checkbox">
+                <label class="song-select-wrap" title="Select song">
+                    <input type="checkbox" class="song-select" data-song-index="${originalIndex}" ${this.selectedSongs.has(originalIndex) ? 'checked' : ''} aria-label="Select song">
+                    <span class="song-check" aria-hidden="true"></span>
+                </label>
+            </div>
+            <div class="song-number">${displayIndex + 1}</div>
+            <div class="song-cover">
+                <div class="cover-placeholder">🎵</div>
+            </div>
+            <div class="song-info-item">
+                <div class="song-name">${titleValue}${this.getSongDetailDotHtml(song)}</div>
+                <div class="song-meta-line">
+                    <span class="song-artist"><img src="icons/user.svg" alt="">${artistValue}</span>
+                    ${metaHtml}
+                </div>
+            </div>
+            <div class="star-rating" data-song-index="${originalIndex}">
+                ${this.generateStars(song.rating || 0)}
+            </div>
+            <span class="quality-indicator">${this.getQualityIndicatorHtml(song)}</span>
+        `;
+
+        if (!skipCover && song.picture) {
+            const coverDiv = div.querySelector('.song-cover');
+            if (coverDiv) this.queueSongCoverRender(coverDiv, song, coverRenderToken);
+        }
+
+        return div;
+    }
+
+    setupSongListInteractions() {
+        if (!this.musicList || this.songListDelegationReady) return;
+        this.songListDelegationReady = true;
+
+        this.musicList.addEventListener('click', (e) => this.handleSongListClick(e));
+        this.musicList.addEventListener('change', (e) => this.handleSongListChange(e));
+        this.musicList.addEventListener('mouseover', (e) => this.handleSongListMouseOver(e));
+        this.musicList.addEventListener('mouseout', (e) => this.handleSongListMouseOut(e));
+    }
+
+    getActiveSongListForInteractions() {
+        const stateSongs = this.virtualSongListState?.songs;
+        if (Array.isArray(stateSongs) && stateSongs.length > 0) return stateSongs;
+        return this.getSongsForCurrentView();
+    }
+
+    handleSongListClick(event) {
+        if (!this.musicList) return;
+
+        const star = event.target?.closest('.star');
+        if (star && this.musicList.contains(star)) {
+            const row = star.closest('.song-item');
+            const songIndex = Number(row?.dataset.songIndex);
+            const rating = Number(star.dataset.rating);
+            if (!Number.isInteger(songIndex) || !Number.isInteger(rating)) return;
+            event.stopPropagation();
+            this.handleSongListStarClick(songIndex, rating);
+            return;
+        }
+
+        const row = event.target?.closest('.song-item');
+        if (!row || !this.musicList.contains(row)) return;
+        if (event.target.closest('.song-checkbox')) return;
+        if (event.target.closest('.star-rating')) return;
+
+        const songIndex = Number(row.dataset.songIndex);
+        const displayIndex = Number(row.dataset.displayIndex);
+        if (!Number.isInteger(songIndex)) return;
+
+        if (this.isVisualizerViewActive) this.disableVisualizerView(true);
+
+        if (this.selectionMode) {
+            const songsToShow = this.getActiveSongListForInteractions();
+            const hasAnchor = Number.isInteger(this.selectionAnchorDisplayIndex);
+            if (event.shiftKey && hasAnchor && Number.isInteger(displayIndex)) {
+                if (!event.ctrlKey && !event.metaKey) this.selectedSongs.clear();
+                this.selectRangeInList(this.selectionAnchorDisplayIndex, displayIndex, songsToShow);
+            } else if (this.selectedSongs.has(songIndex)) {
+                this.selectedSongs.delete(songIndex);
+            } else {
+                this.selectedSongs.add(songIndex);
+            }
+
+            if (Number.isInteger(displayIndex)) this.selectionAnchorDisplayIndex = displayIndex;
+            this.syncSelectionDom();
+            this.updateSelectionUI();
+            return;
+        }
+
+        this.setPlaybackContextFromBrowseContext();
+        this.selectSong(songIndex);
+    }
+
+    handleSongListChange(event) {
+        if (!this.musicList) return;
+
+        const checkbox = event.target?.closest('.song-select[data-song-index]');
+        if (!checkbox || !this.musicList.contains(checkbox)) return;
+
+        const row = checkbox.closest('.song-item');
+        const songIndex = Number(checkbox.dataset.songIndex);
+        if (!Number.isInteger(songIndex)) return;
+
+        event.stopPropagation();
+
+        if (!this.selectionMode) {
+            this.enableSelectionMode(songIndex, { keepExisting: false, showNotification: false, hideMenu: false });
+        }
+
+        const checked = !!checkbox.checked;
+        if (checked) {
+            this.selectedSongs.add(songIndex);
+        } else {
+            this.selectedSongs.delete(songIndex);
+        }
+
+        if (row) {
+            row.classList.toggle('selected', checked);
+            const displayIndex = Number(row.dataset.displayIndex);
+            if (Number.isInteger(displayIndex)) this.selectionAnchorDisplayIndex = displayIndex;
+        }
+
+        this.updateSelectionUI();
+    }
+
+    handleSongListMouseOver(event) {
+        if (!this.musicList) return;
+        const star = event.target?.closest('.star');
+        if (!star || !this.musicList.contains(star)) return;
+        const starRating = star.closest('.star-rating');
+        const hoverRating = Number(star.dataset.rating);
+        if (!starRating || !Number.isInteger(hoverRating)) return;
+        this.previewSongListStarRating(starRating, hoverRating);
+    }
+
+    handleSongListMouseOut(event) {
+        if (!this.musicList) return;
+        const star = event.target?.closest('.star');
+        if (!star || !this.musicList.contains(star)) return;
+
+        const starRating = star.closest('.star-rating');
+        if (!starRating) return;
+        const related = event.relatedTarget;
+        if (related && starRating.contains(related)) return;
+
+        const row = star.closest('.song-item');
+        const songIndex = Number(row?.dataset.songIndex);
+        this.resetSongListStarRating(starRating, songIndex);
+    }
+
+    previewSongListStarRating(starRating, hoverRating) {
+        const stars = starRating.querySelectorAll('.star');
+        stars.forEach((star, index) => {
+            if (index < hoverRating) {
+                star.style.color = '#ffd700';
+                star.style.transform = 'scale(1.4)';
+            } else {
+                star.style.color = '#2a2a2a';
+                star.style.transform = 'scale(1)';
+            }
+        });
+    }
+
+    resetSongListStarRating(starRating, songIndex) {
+        const rating = this.songs[songIndex]?.rating || 0;
+        const stars = starRating.querySelectorAll('.star');
+        stars.forEach((star, index) => {
+            star.style.color = index < rating ? '#ffd700' : '#2a2a2a';
+            star.style.transform = 'scale(1)';
+        });
+    }
+
+    clearSongListStarClickState(songIndex) {
+        if (!this.listStarClickState) this.listStarClickState = new Map();
+        const state = this.listStarClickState.get(songIndex);
+        if (state?.timerId) clearTimeout(state.timerId);
+        this.listStarClickState.delete(songIndex);
+    }
+
+    handleSongListStarClick(songIndex, rating) {
+        if (!Number.isInteger(songIndex) || songIndex < 0 || songIndex >= this.songs.length) return;
+        const song = this.songs[songIndex];
+        if (!song) return;
+
+        if (rating === 1) {
+            const currentRating = song.rating || 0;
+            if (currentRating === 1) {
+                this.clearSongListStarClickState(songIndex);
+                this.rateSong(songIndex, 0);
+            } else if (currentRating > 1) {
+                const existing = this.listStarClickState.get(songIndex);
+                if (existing?.timerId) {
+                    clearTimeout(existing.timerId);
+                    this.listStarClickState.delete(songIndex);
+                    this.rateSong(songIndex, 0);
+                } else {
+                    const timerId = setTimeout(() => {
+                        this.listStarClickState.delete(songIndex);
+                        this.rateSong(songIndex, 1);
+                    }, 300);
+                    this.listStarClickState.set(songIndex, { timerId });
+                }
+            } else {
+                this.clearSongListStarClickState(songIndex);
+                this.rateSong(songIndex, 1);
+            }
+        } else {
+            this.clearSongListStarClickState(songIndex);
+            this.rateSong(songIndex, rating);
+        }
+    }
+
+    updateVisibleSongRating(songIndex) {
+        if (!this.songsDiv) return;
+        const row = this.songsDiv.querySelector(`.song-item[data-song-index="${songIndex}"]`);
+        if (!row) return;
+        const ratingWrap = row.querySelector('.star-rating');
+        if (!ratingWrap) return;
+
+        const rating = this.songs[songIndex]?.rating || 0;
+        const stars = ratingWrap.querySelectorAll('.star');
+        stars.forEach((star, index) => {
+            star.classList.toggle('filled', index < rating);
+            star.style.color = index < rating ? '#ffd700' : '#2a2a2a';
+            star.style.transform = 'scale(1)';
+        });
+    }
+
+    updateRenderedSongActiveState(songIndex) {
+        document.querySelectorAll('.song-item.active').forEach(item => item.classList.remove('active'));
+        if (!this.songsDiv || !Number.isInteger(songIndex) || songIndex < 0) return;
+        const active = this.songsDiv.querySelector(`.song-item[data-song-index="${songIndex}"]`);
+        if (active) active.classList.add('active');
     }
     
     getAudioQualityLevel(song) {
@@ -7600,59 +7967,6 @@ class MusicPlayer {
                   ? 'Lyrics available'
                   : 'Video available';
         return `<span class="song-detail-dot ${dotMode}" title="${title}" aria-label="${title}"></span>`;
-    }
-    
-    addStarEventListeners(songDiv, originalIndex) {
-        const starRating = songDiv.querySelector('.star-rating');
-        const stars = starRating.querySelectorAll('.star');
-        
-        stars.forEach((star, starIndex) => {
-            let clickCount = 0;
-            let clickTimer = null;
-            
-            star.onclick = (e) => {
-                e.stopPropagation();
-                const song = this.songs[originalIndex];
-                
-                if (starIndex === 0) {
-                    const currentRating = song.rating || 0;
-                    if (currentRating === 1) {
-                        this.rateSong(originalIndex, 0);
-                    } else if (currentRating > 1) {
-                        clickCount++;
-                        if (clickCount === 1) {
-                            clickTimer = setTimeout(() => {
-                                this.rateSong(originalIndex, 1);
-                                clickCount = 0;
-                            }, 300);
-                        } else if (clickCount === 2) {
-                            clearTimeout(clickTimer);
-                            this.rateSong(originalIndex, 0);
-                            clickCount = 0;
-                        }
-                    } else {
-                        this.rateSong(originalIndex, 1);
-                    }
-                } else {
-                    this.rateSong(originalIndex, starIndex + 1);
-                }
-            };
-            
-            star.onmouseenter = () => {
-                stars.forEach((s, i) => {
-                    s.style.color = i <= starIndex ? '#ffd700' : '#2a2a2a';
-                    s.style.transform = i <= starIndex ? 'scale(1.4)' : 'scale(1)';
-                });
-            };
-        });
-        
-        starRating.onmouseleave = () => {
-            const rating = this.songs[originalIndex].rating || 0;
-            stars.forEach((s, i) => {
-                s.style.color = i < rating ? '#ffd700' : '#2a2a2a';
-                s.style.transform = 'scale(1)';
-            });
-        };
     }
     
     toggleShuffle() {
@@ -8094,22 +8408,27 @@ class MusicPlayer {
     
     scrollToCurrentSong() {
         if (this.currentSongIndex < 0) return;
-        
-        const songItems = document.querySelectorAll('.song-item');
-        
-        // Find the displayed song item that matches current song
-        let targetItem = null;
+
+        const state = this.virtualSongListState;
+        const activeSongs = this.getActiveSongListForInteractions();
         const currentSong = this.songs[this.currentSongIndex];
-        
-        songItems.forEach(item => {
-            const songName = item.querySelector('.song-name')?.textContent;
-            if (songName === currentSong.title) {
-                targetItem = item;
-            }
-        });
-        
-        if (targetItem) {
-            targetItem.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (!currentSong || !Array.isArray(activeSongs) || activeSongs.length === 0) return;
+
+        const displayIndex = activeSongs.indexOf(currentSong);
+        if (displayIndex < 0) return;
+
+        if (state?.songs === activeSongs && this.musicList) {
+            const rowHeight = Number.isFinite(state.rowHeight) && state.rowHeight > 0 ? state.rowHeight : 86;
+            const centerOffset = Math.max(0, (this.musicList.clientHeight - rowHeight) / 2);
+            const targetTop = Math.max(0, (displayIndex * rowHeight) - centerOffset);
+            this.musicList.scrollTo({ top: targetTop, behavior: 'auto' });
+            this.scheduleVirtualSongViewportRender(true);
+            return;
+        }
+
+        const visibleRow = this.songsDiv?.querySelector(`.song-item[data-song-index="${this.currentSongIndex}"]`);
+        if (visibleRow) {
+            visibleRow.scrollIntoView({ behavior: 'auto', block: 'center' });
         }
     }
     
