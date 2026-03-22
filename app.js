@@ -136,6 +136,10 @@ class MusicPlayer {
         this.mediaSessionPositionUpdateAt = 0;
         this.mediaSessionFallbackArtwork = 'icons/default-playlist.png';
         this.songSearchDocCache = new WeakMap();
+        this.syncedLyricsMemoryCache = new Map();
+        this.syncedLyricsFetchInFlight = new Map();
+        this.activeLyricsFetchController = null;
+        this.lyricsFetchStatusTimeout = 0;
 
         
         this.initElements();
@@ -298,6 +302,8 @@ class MusicPlayer {
         this.videoBtn = document.getElementById('videoBtn');
         this.visualizerBtn = document.getElementById('visualizerBtn');
         this.lyricsToggleBtn = document.getElementById('lyricsToggleBtn');
+        this.autoFetchLyricsBtn = document.getElementById('autoFetchLyricsBtn');
+        this.lyricsFetchStatus = document.getElementById('lyricsFetchStatus');
         this.offsetToggleBtn = document.getElementById('offsetToggleBtn');
         this.timingBackward = document.getElementById('timingBackward');
         this.timingForward = document.getElementById('timingForward');
@@ -1014,7 +1020,7 @@ class MusicPlayer {
             return;
         }
         const selectionToken = ++this.songSelectionToken;
-        const transitionToken = this.beginMediaTransition('select-song');
+        this.beginMediaTransition('select-song');
         if (this.previewMode) {
             this.previewMode = false;
             this.previewTrack = null;
@@ -1023,6 +1029,7 @@ class MusicPlayer {
         }
         this.currentSongIndex = index;
         const song = this.songs[index];
+        this.cancelActiveLyricsFetch();
 
         if (this.shuffleMode) {
             // If playback context changed while shuffling, regenerate once we land on a song within that context.
@@ -1153,54 +1160,10 @@ class MusicPlayer {
         
         // Click handler is set in setupAlbumCoverDragDrop()
         
-        // Send song info to floating window immediately
-        ipcRenderer.send('update-floating-lyrics', {
-            songInfo: {
-                title: song.title,
-                artist: song.artist
-            },
-            lyrics: [],
-            currentIndex: -1
-        });
-        
-        // Load lyrics (only for audio files)
-        if (song.hasLyrics && !song.isVideo) {
-            const lyricsText = await ipcRenderer.invoke('read-lyrics', song.lyricsFile);
-            if (selectionToken !== this.songSelectionToken || !this.isMediaTransitionCurrent(transitionToken)) return;
-            this.parseLyrics(lyricsText);
-            ipcRenderer.send('update-floating-lyrics', {
-                lyrics: this.lyrics,
-                songInfo: {
-                    title: song.title,
-                    artist: song.artist
-                }
-            });
-        } else {
-            this.lyrics = [];
-            this.lyricsDiv.innerHTML = `
-                <div class="no-lyrics-container">
-                    <p class="no-lyrics">No lyrics available</p>
-                    <div class="lyrics-instructions">
-                        <ul class="instruction-list">
-                            <li>Add .lrc file to music folder</li>
-                            <li>Right-click and paste synced lyrics</li>
-                            <li><a href="#" onclick="player.searchMusicOnline()" style="color: #4a9eff; text-decoration: none;">Search for Lyrics Online</a></li>
-                        </ul>
-                        <p class="format-hint">Synced lyrics format: [00:12.34]Lyric text here</p>
-                    </div>
-                </div>
-            `;
-            this.setupLyricsDragDrop();
-            this.setupLyricsKeyboardShortcut();
-            ipcRenderer.send('update-floating-lyrics', {
-                lyrics: [],
-                songInfo: {
-                    title: song.title,
-                    artist: song.artist
-                }
-            });
-        }
-        
+        this.currentLyricIndex = -1;
+        this.clearLyricHighlight();
+        this.syncFloatingLyrics(song, [], -1);
+
         this.enableControls();
         this.updateCurrentSongRating();
         
@@ -1241,22 +1204,441 @@ class MusicPlayer {
         this.updateMediaAvailabilityButtons(song);
         this.renderQueuePanelIfVisible();
         this.syncMediaSessionPlaybackState();
+
+        // Lyrics loading is intentionally non-blocking so audio/video starts immediately.
+        void this.loadLyricsForSong(song, { selectionToken, manualTrigger: false }).catch(() => {
+            if (selectionToken === this.songSelectionToken) {
+                this.currentLyricIndex = -1;
+                this.clearLyricHighlight();
+                this.setLyricsFetchStatus('No Synced Lyrics Found', 'empty');
+                this.syncFloatingLyrics(song, [], -1);
+            }
+        });
+    }
+
+    hasLocalLyricsForSong(song) {
+        return !!song && !song.isVideo && !!song.hasLyrics && typeof song.lyricsFile === 'string' && song.lyricsFile.trim().length > 0;
+    }
+
+    updateAutoFetchLyricsButtonState(song = null) {
+        if (!this.autoFetchLyricsBtn) return;
+        const currentSong = song || (Number.isInteger(this.currentSongIndex) ? this.songs[this.currentSongIndex] : null);
+        const canFetch = !!currentSong && !currentSong.isVideo && !this.previewMode;
+        this.autoFetchLyricsBtn.disabled = !canFetch;
+        this.autoFetchLyricsBtn.classList.toggle('disabled', !canFetch);
+    }
+
+    setLyricsFetchStatus(message, status = 'info', clearAfterMs = 2200) {
+        if (!this.lyricsFetchStatus) return;
+
+        if (this.lyricsFetchStatusTimeout) {
+            clearTimeout(this.lyricsFetchStatusTimeout);
+            this.lyricsFetchStatusTimeout = 0;
+        }
+
+        const text = typeof message === 'string' ? message.trim() : '';
+        this.lyricsFetchStatus.textContent = text;
+        this.lyricsFetchStatus.classList.remove('is-fetching', 'is-loaded', 'is-empty');
+
+        if (!text) return;
+
+        if (status === 'fetching') this.lyricsFetchStatus.classList.add('is-fetching');
+        if (status === 'loaded') this.lyricsFetchStatus.classList.add('is-loaded');
+        if (status === 'empty') this.lyricsFetchStatus.classList.add('is-empty');
+
+        if (Number.isFinite(clearAfterMs) && clearAfterMs > 0) {
+            this.lyricsFetchStatusTimeout = setTimeout(() => {
+                this.lyricsFetchStatusTimeout = 0;
+                this.lyricsFetchStatus.textContent = '';
+                this.lyricsFetchStatus.classList.remove('is-fetching', 'is-loaded', 'is-empty');
+            }, clearAfterMs);
+        }
+    }
+
+    renderNoLyricsState() {
+        this.lyrics = [];
+        this.lyricsDiv.innerHTML = `
+            <div class="no-lyrics-container">
+                <p class="no-lyrics">No lyrics available</p>
+                <div class="lyrics-instructions">
+                    <ul class="instruction-list">
+                        <li>Add .lrc file to music folder</li>
+                        <li>Right-click and paste synced lyrics</li>
+                        <li><a href="#" onclick="player.fetchLyricsForCurrentSong({ manualTrigger: true }); return false;" style="color: #4a9eff; text-decoration: none;">Fetch Synced Lyrics (LRCLIB)</a></li>
+                    </ul>
+                    <p class="format-hint">Synced lyrics format: [00:12.34]Lyric text here</p>
+                </div>
+            </div>
+        `;
+        this.setupLyricsDragDrop();
+        this.setupLyricsKeyboardShortcut();
+    }
+
+    syncFloatingLyrics(song, lyricsOverride = null, currentIndexOverride = null) {
+        const payloadLyrics = Array.isArray(lyricsOverride) ? lyricsOverride : this.lyrics;
+        const currentIndex = Number.isInteger(currentIndexOverride) ? currentIndexOverride : this.currentLyricIndex;
+        ipcRenderer.send('update-floating-lyrics', {
+            lyrics: payloadLyrics,
+            songInfo: {
+                title: song?.title || '',
+                artist: song?.artist || ''
+            },
+            currentIndex: Number.isInteger(currentIndex) ? currentIndex : -1
+        });
+    }
+
+    cancelActiveLyricsFetch() {
+        if (!this.activeLyricsFetchController) return;
+        try {
+            this.activeLyricsFetchController.abort();
+        } catch {
+            // Ignore cancellation errors.
+        }
+        this.activeLyricsFetchController = null;
+    }
+
+    syncLyricsToCurrentPlaybackPosition() {
+        const currentTime = this.isVideoMode ? this.videoElement?.currentTime : this.audio?.currentTime;
+        if (!Number.isFinite(currentTime)) return;
+        this.highlightLyrics(currentTime);
+    }
+
+    async loadLyricsForSong(song, { selectionToken = null, manualTrigger = false } = {}) {
+        const isStillCurrent = () => {
+            return selectionToken === null || selectionToken === this.songSelectionToken;
+        };
+
+        try {
+            if (!isStillCurrent()) return false;
+            this.updateAutoFetchLyricsButtonState(song);
+            if (!isStillCurrent()) return false;
+
+            if (!song || song.isVideo) {
+                if (!isStillCurrent()) return false;
+                this.currentLyricIndex = -1;
+                this.clearLyricHighlight();
+                this.setLyricsFetchStatus('');
+                this.renderNoLyricsState();
+                this.syncFloatingLyrics(song, [], -1);
+                return false;
+            }
+
+            if (this.hasLocalLyricsForSong(song)) {
+                const lyricsText = await ipcRenderer.invoke('read-lyrics', song.lyricsFile);
+                if (!isStillCurrent()) return false;
+
+                const parsedLocal = this.parseLrcLyrics(lyricsText);
+                if (parsedLocal.length > 0) {
+                    this.lyrics = parsedLocal;
+                    this.displayLyrics();
+                    this.currentLyricIndex = -1;
+                    this.syncLyricsToCurrentPlaybackPosition();
+                    this.setLyricsFetchStatus('Lyrics Loaded', 'loaded');
+                    this.syncFloatingLyrics(song, null, this.currentLyricIndex);
+                    return true;
+                }
+
+                // Local metadata points to a missing/invalid file; treat as unavailable and continue to auto-fetch.
+                song.hasLyrics = false;
+                song.lyricsFile = null;
+                song.lyricsMatch = null;
+                const idx = this.songs.indexOf(song);
+                if (idx >= 0) this.updateSongBadge(idx, false);
+            }
+
+            if (!isStillCurrent()) return false;
+            this.setLyricsFetchStatus('Fetching...', 'fetching', 0);
+            this.cancelActiveLyricsFetch();
+            const fetchController = new AbortController();
+            this.activeLyricsFetchController = fetchController;
+
+            const syncedLyrics = await this.fetchAndPersistSyncedLyrics(song, {
+                bypassNoResultCache: manualTrigger,
+                signal: fetchController.signal
+            });
+            if (this.activeLyricsFetchController === fetchController) {
+                this.activeLyricsFetchController = null;
+            }
+
+            if (fetchController.signal.aborted) {
+                if (isStillCurrent()) this.setLyricsFetchStatus('');
+                return false;
+            }
+            if (!isStillCurrent()) return false;
+
+            if (typeof syncedLyrics === 'string' && syncedLyrics.trim().length > 0) {
+                const parsedFetched = this.parseLrcLyrics(syncedLyrics);
+                if (parsedFetched.length > 0) {
+                    this.lyrics = parsedFetched;
+                    this.displayLyrics();
+                    this.currentLyricIndex = -1;
+                    this.syncLyricsToCurrentPlaybackPosition();
+                    this.setLyricsFetchStatus('Lyrics Loaded', 'loaded');
+                    this.syncFloatingLyrics(song, null, this.currentLyricIndex);
+                    return true;
+                }
+            }
+
+            this.currentLyricIndex = -1;
+            this.clearLyricHighlight();
+            this.renderNoLyricsState();
+            this.setLyricsFetchStatus('No Synced Lyrics Found', 'empty');
+            this.syncFloatingLyrics(song, [], -1);
+            return false;
+        } catch (error) {
+            if (error?.name !== 'AbortError') {
+                console.error('Lyrics loading failed:', error);
+            }
+            if (isStillCurrent()) {
+                this.currentLyricIndex = -1;
+                this.clearLyricHighlight();
+                this.renderNoLyricsState();
+                this.setLyricsFetchStatus('No Synced Lyrics Found', 'empty');
+                this.syncFloatingLyrics(song, [], -1);
+            }
+            return false;
+        }
+    }
+
+    async fetchLyricsForCurrentSong({ manualTrigger = false } = {}) {
+        if (this.currentSongIndex < 0) return null;
+        const song = this.songs[this.currentSongIndex];
+        if (!song || song.isVideo) return null;
+
+        await this.loadLyricsForSong(song, {
+            selectionToken: this.songSelectionToken,
+            manualTrigger: !!manualTrigger
+        });
+        return true;
+    }
+
+    buildLyricsCacheKey(trackName, artistName) {
+        const track = this.normalizeLyricsLookupValue(trackName);
+        const artist = this.normalizeLyricsLookupValue(artistName);
+        if (!track && !artist) return '';
+        return `${track}::${artist}`;
+    }
+
+    normalizeLyricsLookupValue(value) {
+        return String(value || '')
+            .normalize('NFKC')
+            .toLowerCase()
+            .replace(/[^\p{L}\p{M}\p{N}\s]+/gu, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    extractSyncedLyricsValue(result) {
+        if (!result || typeof result !== 'object') return null;
+        const value = typeof result.syncedLyrics === 'string' ? result.syncedLyrics.trim() : '';
+        return value.length > 0 ? value : null;
+    }
+
+    isExactLyricsMatch(result, trackName, artistName) {
+        const targetTrack = this.normalizeLyricsLookupValue(trackName);
+        const targetArtist = this.normalizeLyricsLookupValue(artistName);
+        const candidateTrack = this.normalizeLyricsLookupValue(result?.trackName || result?.name || '');
+        const candidateArtist = this.normalizeLyricsLookupValue(result?.artistName || result?.artist || '');
+        if (!targetTrack || !targetArtist || !candidateTrack || !candidateArtist) return false;
+        if (targetTrack !== candidateTrack) return false;
+        return targetArtist === candidateArtist || candidateArtist.includes(targetArtist) || targetArtist.includes(candidateArtist);
+    }
+
+    computeLyricsMatchScore(result, trackName, artistName) {
+        const targetTrack = this.normalizeLyricsLookupValue(trackName);
+        const targetArtist = this.normalizeLyricsLookupValue(artistName);
+        const candidateTrack = this.normalizeLyricsLookupValue(result?.trackName || result?.name || '');
+        const candidateArtist = this.normalizeLyricsLookupValue(result?.artistName || result?.artist || '');
+
+        if (!targetTrack || !candidateTrack) return 0;
+
+        const titleScore = this.bigramDiceSimilarity(targetTrack, candidateTrack);
+        const artistScore = targetArtist && candidateArtist ? this.bigramDiceSimilarity(targetArtist, candidateArtist) : 0;
+        const titleBoost = candidateTrack.includes(targetTrack) || targetTrack.includes(candidateTrack) ? 0.08 : 0;
+        const artistBoost = (targetArtist && candidateArtist && (candidateArtist.includes(targetArtist) || targetArtist.includes(candidateArtist))) ? 0.05 : 0;
+        return (titleScore * 0.72) + (artistScore * 0.28) + titleBoost + artistBoost;
+    }
+
+    pickBestSyncedLyricsResult(results, trackName, artistName) {
+        if (!Array.isArray(results) || results.length === 0) return null;
+
+        const exact = results.find(result => this.isExactLyricsMatch(result, trackName, artistName));
+        if (exact) return exact;
+
+        let best = null;
+        let bestScore = 0;
+        for (const result of results) {
+            const score = this.computeLyricsMatchScore(result, trackName, artistName);
+            if (score > bestScore) {
+                bestScore = score;
+                best = result;
+            }
+        }
+
+        return bestScore >= 0.26 ? best : null;
+    }
+
+    async lrclibFetchJson(url, timeoutMs = 8000, externalSignal = null) {
+        const controller = new AbortController();
+        const forwardAbort = () => controller.abort();
+        if (externalSignal) {
+            if (externalSignal.aborted) controller.abort();
+            else externalSignal.addEventListener('abort', forwardAbort, { once: true });
+        }
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            const response = await fetch(url, {
+                method: 'GET',
+                headers: { 'Accept': 'application/json' },
+                signal: controller.signal
+            });
+            if (!response.ok) return null;
+            return await response.json();
+        } catch {
+            return null;
+        } finally {
+            clearTimeout(timeoutId);
+            if (externalSignal) {
+                externalSignal.removeEventListener('abort', forwardAbort);
+            }
+        }
+    }
+
+    async fetchSyncedLyricsFromLrclib(trackName, artistName, { signal = null } = {}) {
+        const query = `${trackName || ''} ${artistName || ''}`.trim();
+        if (!query) return null;
+        if (signal?.aborted) return null;
+
+        const searchUrl = `https://lrclib.net/api/search?q=${encodeURIComponent(query)}`;
+        const searchResults = await this.lrclibFetchJson(searchUrl, 8000, signal);
+        if (!Array.isArray(searchResults) || searchResults.length === 0) return null;
+        if (signal?.aborted) return null;
+
+        const syncedResults = searchResults.filter(result => this.extractSyncedLyricsValue(result));
+        if (syncedResults.length === 0) return null;
+
+        const best = this.pickBestSyncedLyricsResult(syncedResults, trackName, artistName);
+        if (!best) return null;
+
+        const resultId = best.id ?? best.trackId ?? null;
+        if (resultId !== null && resultId !== undefined) {
+            const getUrl = `https://lrclib.net/api/get/${encodeURIComponent(String(resultId))}`;
+            const resolved = await this.lrclibFetchJson(getUrl, 8000, signal);
+            const syncedFromGet = this.extractSyncedLyricsValue(resolved);
+            if (syncedFromGet) return syncedFromGet;
+        }
+
+        return this.extractSyncedLyricsValue(best);
+    }
+
+    async fetchAndPersistSyncedLyrics(song, { bypassNoResultCache = false, signal = null } = {}) {
+        if (!song || song.isVideo) return null;
+        if (signal?.aborted) return null;
+
+        const cacheKey = this.buildLyricsCacheKey(song.title, song.artist);
+        if (!cacheKey) return null;
+
+        if (this.syncedLyricsMemoryCache.has(cacheKey)) {
+            const cached = this.syncedLyricsMemoryCache.get(cacheKey);
+            if (typeof cached === 'string' && cached.trim().length > 0) return cached;
+            if (cached === null && !bypassNoResultCache) return null;
+        }
+
+        if (this.syncedLyricsFetchInFlight.has(cacheKey)) {
+            try {
+                return await this.syncedLyricsFetchInFlight.get(cacheKey);
+            } catch {
+                return null;
+            }
+        }
+
+        const fetchPromise = (async () => {
+            const syncedLyrics = await this.fetchSyncedLyricsFromLrclib(song.title, song.artist, { signal });
+            if (signal?.aborted) return null;
+            if (!syncedLyrics) {
+                if (!bypassNoResultCache) this.syncedLyricsMemoryCache.set(cacheKey, null);
+                return null;
+            }
+
+            this.syncedLyricsMemoryCache.set(cacheKey, syncedLyrics);
+            try {
+                const saved = await ipcRenderer.invoke('save-pasted-lyrics', song.baseName, syncedLyrics);
+                if (signal?.aborted) return null;
+                if (saved) {
+                    song.hasLyrics = true;
+                    song.lyricsFile = song.baseName;
+                    song.lyricsMatch = song.baseName;
+                    const idx = this.songs.indexOf(song);
+                    if (idx >= 0) this.updateSongBadge(idx, true);
+                    this.updateMediaAvailabilityButtons(song);
+                }
+            } catch {
+                // Save failure should not crash playback/lyrics flow.
+            }
+
+            return syncedLyrics;
+        })()
+            .catch(error => {
+                if (error?.name !== 'AbortError') {
+                    console.error('Synced lyrics fetch failed:', error);
+                }
+                return null;
+            })
+            .finally(() => {
+                this.syncedLyricsFetchInFlight.delete(cacheKey);
+            });
+
+        this.syncedLyricsFetchInFlight.set(cacheKey, fetchPromise);
+        return await fetchPromise;
+    }
+
+    parseLrcLyrics(text) {
+        if (!text || typeof text !== 'string') return [];
+
+        const entries = [];
+        const lines = text.split(/\r?\n/);
+        const timeRegex = /\[(\d{1,2})(?::(\d{2})(?:[.:](\d{1,3}))?|[.:](\d{1,3}))\]/g;
+
+        lines.forEach(rawLine => {
+            if (!rawLine) return;
+            const line = String(rawLine);
+            timeRegex.lastIndex = 0;
+            const textOnly = line.replace(timeRegex, '').trim();
+            const lyricText = textOnly || ' ♪ ♪ ♪';
+
+            timeRegex.lastIndex = 0;
+            let match = null;
+            while ((match = timeRegex.exec(line)) !== null) {
+                const minutes = parseInt(match[1], 10);
+                const seconds = parseInt(match[2] || '0', 10);
+                const fractionRaw = match[3] || match[4] || '0';
+                let fraction = 0;
+
+                if (fractionRaw.length >= 3) {
+                    fraction = parseInt(fractionRaw.slice(0, 3), 10) / 1000;
+                } else if (fractionRaw.length === 2) {
+                    fraction = parseInt(fractionRaw, 10) / 100;
+                } else if (fractionRaw.length === 1) {
+                    fraction = parseInt(fractionRaw, 10) / 10;
+                }
+
+                const timestamp = (minutes * 60) + seconds + fraction;
+                if (!Number.isFinite(timestamp)) continue;
+                entries.push({ time: timestamp, text: lyricText });
+            }
+        });
+
+        entries.sort((a, b) => a.time - b.time);
+        return entries;
     }
 
     parseLyrics(text) {
-        this.lyrics = [];
-        if (!text) return;
-        
-        text.split('\n').forEach(line => {
-            const match = line.match(/\[(\d{2}):(\d{2})\.(\d{2})\](.*)/);
-            if (match) {
-                const time = parseInt(match[1], 10) * 60 + parseInt(match[2], 10) + parseInt(match[3], 10) / 100;
-                const lyric = match[4].trim();
-                this.lyrics.push({ time, text: lyric || ' ♪ ♪ ♪' });
-            }
-        });
-        
+        this.lyrics = this.parseLrcLyrics(text);
         this.displayLyrics();
+        this.currentLyricIndex = -1;
+        this.syncLyricsToCurrentPlaybackPosition();
+        const currentSong = Number.isInteger(this.currentSongIndex) ? this.songs[this.currentSongIndex] : null;
+        if (currentSong) this.syncFloatingLyrics(currentSong, null, this.currentLyricIndex);
     }
 
     displayLyrics() {
@@ -1281,6 +1663,7 @@ class MusicPlayer {
     setPreviewOptionState(isPreview) {
         const controls = [
             this.lyricsToggleBtn,
+            this.autoFetchLyricsBtn,
             this.lyricsFontBtn,
             this.offsetToggleBtn,
             this.videoBtn,
@@ -1304,6 +1687,8 @@ class MusicPlayer {
             if (this.lyricsFontBtn) this.lyricsFontBtn.classList.remove('active');
             if (this.lyricsTimingControls) this.lyricsTimingControls.style.display = 'none';
             if (this.offsetToggleBtn) this.offsetToggleBtn.classList.remove('active');
+        } else {
+            this.updateAutoFetchLyricsButtonState();
         }
     }
 
@@ -1870,8 +2255,8 @@ class MusicPlayer {
     }
     
     openFloatingLyrics() {
-        if (this.floatLyricsBtn?.disabled) {
-            this.showNotification('No lyrics available for this song', 'info');
+        if (this.currentSongIndex < 0 || this.currentSongIndex >= this.songs.length) {
+            this.showNotification('Play a song first', 'info');
             return;
         }
         // Check if floating window exists, if so close it
@@ -1882,19 +2267,10 @@ class MusicPlayer {
             } else {
                 ipcRenderer.send('create-floating-lyrics');
                 this.floatLyricsBtn.classList.add('active');
-                
-                // Send current lyrics and position immediately
-                if (this.lyrics.length > 0) {
-                    ipcRenderer.send('update-floating-lyrics', {
-                        lyrics: this.lyrics
-                    });
-                    
-                    if (this.currentLyricIndex >= 0) {
-                        ipcRenderer.send('update-floating-lyrics', {
-                            currentIndex: this.currentLyricIndex
-                        });
-                    }
-                }
+
+                // Send current song info + lyrics state immediately (even when lyrics are pending/empty).
+                const currentSong = this.songs[this.currentSongIndex];
+                if (currentSong) this.syncFloatingLyrics(currentSong, null, this.currentLyricIndex);
             }
         });
     }
@@ -3024,6 +3400,12 @@ class MusicPlayer {
         this.videoBtn.onclick = () => this.toggleVideoMode();
         if (this.visualizerBtn) this.visualizerBtn.onclick = () => this.toggleVisualizerView();
         this.lyricsToggleBtn.onclick = () => this.toggleLyrics();
+        if (this.autoFetchLyricsBtn) {
+            this.autoFetchLyricsBtn.onclick = () => {
+                this.fetchLyricsForCurrentSong({ manualTrigger: true }).catch(() => {});
+            };
+        }
+        this.setLyricsFetchStatus('');
     }
     
     setupTimingControls() {
@@ -3401,8 +3783,8 @@ class MusicPlayer {
             return;
         }
         const currentSong = song || (this.currentSongIndex >= 0 ? this.songs[this.currentSongIndex] : null);
-        const hasLyrics = !!currentSong && !!currentSong.hasLyrics && !currentSong.isVideo;
         const hasVideo = !!currentSong && (!!currentSong.isVideo || !!currentSong.attachedVideo || !!currentSong.youtubeVideo);
+        const canUseFloatingLyrics = !!currentSong;
 
         if (this.videoBtn) {
             this.videoBtn.disabled = !hasVideo;
@@ -3410,17 +3792,12 @@ class MusicPlayer {
         }
 
         if (this.floatLyricsBtn) {
-            if (!hasLyrics) {
-                // Avoid trapping the user with an open floating window and a disabled close button.
-                ipcRenderer.invoke('is-floating-window-open')
-                    .then(isOpen => {
-                        if (isOpen) ipcRenderer.send('close-floating-lyrics');
-                    })
-                    .catch(() => {});
+            if (!canUseFloatingLyrics) {
                 this.floatLyricsBtn.classList.remove('active');
             }
-            this.floatLyricsBtn.disabled = !hasLyrics;
-            this.floatLyricsBtn.style.opacity = hasLyrics ? '1' : '0.4';
+            // Keep floating lyrics available even if the current song has no local lyrics yet.
+            this.floatLyricsBtn.disabled = !canUseFloatingLyrics;
+            this.floatLyricsBtn.style.opacity = canUseFloatingLyrics ? '1' : '0.4';
         }
 
         // Lyrics toggle stays available always; only the font/settings depend on lyrics availability + visibility.

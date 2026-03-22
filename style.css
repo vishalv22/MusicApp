@@ -1468,6 +1468,44 @@ body.selection-mode #selectModeBtn {
     gap: 10px;
 }
 
+.lyrics-fetch-btn {
+    width: auto;
+    min-width: 52px;
+    height: 28px;
+    border-radius: 999px;
+    padding: 0 10px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+    color: #d6d6d6;
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.lyrics-fetch-btn:hover {
+    background: rgba(255, 255, 255, 0.14);
+}
+
+.lyrics-fetch-status {
+    min-width: 140px;
+    text-align: right;
+    font-size: 11px;
+    color: #8e8e8e;
+    letter-spacing: 0.2px;
+}
+
+.lyrics-fetch-status.is-fetching {
+    color: #f1c40f;
+}
+
+.lyrics-fetch-status.is-loaded {
+    color: #2ecc71;
+}
+
+.lyrics-fetch-status.is-empty {
+    color: #ff9f43;
+}
+
 .lyrics-timing-controls,
 .lyrics-font-controls {
     display: flex;
@@ -3382,6 +3420,19 @@ body.light-theme .header h3 {
 
 body.light-theme .lyrics-header h3 {
     color: #222222;
+}
+
+body.light-theme .lyrics-fetch-btn {
+    color: #222222;
+    background: rgba(0, 0, 0, 0.06);
+}
+
+body.light-theme .lyrics-fetch-btn:hover {
+    background: rgba(0, 0, 0, 0.1);
+}
+
+body.light-theme .lyrics-fetch-status {
+    color: #7a7a7a;
 }
 
 body.light-theme .song-details h3 {
