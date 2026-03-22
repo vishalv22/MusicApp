@@ -914,6 +914,7 @@ class MusicPlayer {
     }
     
     displayEmptyState() {
+        this.resetSongCoverRenderQueue();
         this.songsDiv.innerHTML = `
             <div class="empty-library">
                 <div class="empty-icon">📁</div>
@@ -926,6 +927,58 @@ class MusicPlayer {
                 <p class="sub-text tip">💡 Tip: Your music files stay in their original locations</p>
             </div>
         `;
+    }
+
+    displayContextEmptyState() {
+        this.resetSongCoverRenderQueue();
+        if (this.currentPlaylist) {
+            this.songsDiv.innerHTML = `
+                <div class="empty-library">
+                    <div class="empty-icon">📋</div>
+                    <h3>Empty Playlist</h3>
+                    <p>This playlist has no songs yet</p>
+                    <p class="sub-text">Right-click on songs to add them to this playlist</p>
+                </div>
+            `;
+            return;
+        }
+
+        const category = this.normalizeCategory(this.currentCategory || 'all');
+        if (category !== 'all') {
+            const emptyCategoryMeta = {
+                video: {
+                    icon: '🎬',
+                    title: 'No video songs found',
+                    description: 'Add videos or attach videos to songs to see them here'
+                },
+                rated: {
+                    icon: '⭐',
+                    title: 'No rated songs yet',
+                    description: 'Rate songs to populate this category'
+                },
+                recent: {
+                    icon: '🕒',
+                    title: 'No recently added songs',
+                    description: 'Newly scanned tracks will appear here'
+                }
+            };
+            const state = emptyCategoryMeta[category] || {
+                icon: '🎵',
+                title: 'No songs found',
+                description: 'Try another category'
+            };
+
+            this.songsDiv.innerHTML = `
+                <div class="empty-library">
+                    <div class="empty-icon">${state.icon}</div>
+                    <h3>${state.title}</h3>
+                    <p>${state.description}</p>
+                </div>
+            `;
+            return;
+        }
+
+        this.displayEmptyState();
     }
 
     async selectSong(index, autoPlay = true) {
@@ -5463,7 +5516,7 @@ class MusicPlayer {
             return;
         }
         
-        this.showMusicView();
+        this.showMusicView({ restoreSearch: false });
         this.settingsBtn.classList.remove('active');
         
         // Clear search input when switching playlists
@@ -5484,14 +5537,7 @@ class MusicPlayer {
         
         if (playlistSongs.length === 0) {
             this.filteredSongs = [];
-            this.songsDiv.innerHTML = `
-                <div class="empty-library">
-                    <div class="empty-icon">📋</div>
-                    <h3>Empty Playlist</h3>
-                    <p>This playlist has no songs yet</p>
-                    <p class="sub-text">Right-click on songs to add them to this playlist</p>
-                </div>
-            `;
+            this.displayContextEmptyState();
         } else {
             this.filteredSongs = playlistSongs;
             this.displayFilteredSongs();
@@ -5706,7 +5752,7 @@ class MusicPlayer {
 
         if (this.isVisualizerViewActive) this.disableVisualizerView(true);
         
-        this.showMusicView();
+        this.showMusicView({ restoreSearch: false });
         this.settingsBtn.classList.remove('active');
         
         // Clear search input when switching categories
@@ -5762,7 +5808,10 @@ class MusicPlayer {
     
 
     
-    showMusicView() {
+    showMusicView(options = {}) {
+        const cameFromDownload = this.currentView === 'download';
+        const shouldRestoreSearch = options.restoreSearch ?? cameFromDownload;
+
         this.hideAllPanels();
         document.getElementById('musicContainer').style.display = 'flex';
         this.leftPanel.classList.remove('download-active');
@@ -5772,7 +5821,12 @@ class MusicPlayer {
         document.body.classList.remove('download-minimal');
         if (this.downloadMusicBtn) this.downloadMusicBtn.classList.remove('active');
         this.currentView = 'music';
-        this.restoreLibrarySearchBar();
+        if (this.searchInput) {
+            this.searchInput.placeholder = this.defaultSearchPlaceholder || 'Search here...';
+        }
+        if (shouldRestoreSearch) {
+            this.restoreLibrarySearchBar();
+        }
         
         // Move video back to default position if it was in main panel
         if (this.videoInMainPanel) {
@@ -5802,8 +5856,21 @@ class MusicPlayer {
         return Array.from(document.querySelectorAll('.song-select[data-song-index]'));
     }
 
+    getBrowseContextSongs() {
+        if (this.currentPlaylist) {
+            return this.getPlaylistSongs(this.currentPlaylist);
+        }
+
+        const category = this.normalizeCategory(this.currentCategory || 'all');
+        if (category !== 'all') {
+            return this.getSongsForCategory(category);
+        }
+
+        return Array.isArray(this.songs) ? this.songs : [];
+    }
+
     getSongsForCurrentView() {
-        const list = Array.isArray(this.filteredSongs) && this.filteredSongs.length > 0 ? this.filteredSongs : this.songs;
+        const list = Array.isArray(this.filteredSongs) ? this.filteredSongs : this.getBrowseContextSongs();
         return Array.isArray(list) ? list : [];
     }
 
@@ -6829,20 +6896,15 @@ class MusicPlayer {
                   .filter(Boolean)
             : [];
 
-        switch(type) {
-            case 'title':
-                this.songs.sort((a, b) => a.title.localeCompare(b.title));
-                break;
-            case 'artist':
-                this.songs.sort((a, b) => a.artist.localeCompare(b.artist));
-                break;
-            case 'rating':
-                this.songs.sort((a, b) => (b.rating || 0) - (a.rating || 0));
-                break;
-            case 'recent':
-                this.songs.sort((a, b) => (b.loadIndex || 0) - (a.loadIndex || 0));
-                break;
-        }
+        const comparators = {
+            title: (a, b) => String(a?.title || a?.name || '').localeCompare(String(b?.title || b?.name || '')),
+            artist: (a, b) => String(a?.artist || '').localeCompare(String(b?.artist || '')),
+            rating: (a, b) => (Number(b?.rating) || 0) - (Number(a?.rating) || 0),
+            recent: (a, b) => (Number(b?.loadIndex) || 0) - (Number(a?.loadIndex) || 0)
+        };
+        const comparator = comparators[type] || comparators.title;
+
+        this.songs.sort(comparator);
 
         this.rebuildSongIndexLookup();
 
@@ -6855,7 +6917,22 @@ class MusicPlayer {
             this.selectedSongs = nextSelection;
         }
 
-        this.displaySongs();
+        const activeQuery = this.searchInput?.value?.trim() || '';
+        if (activeQuery) {
+            this.filterSongs(activeQuery);
+        } else if (this.currentPlaylist) {
+            this.filteredSongs = [...this.getPlaylistSongs(this.currentPlaylist)].sort(comparator);
+            this.displayFilteredSongs();
+        } else {
+            const category = this.normalizeCategory(this.currentCategory || 'all');
+            if (category !== 'all') {
+                this.filteredSongs = [...this.getSongsForCategory(category)].sort(comparator);
+                this.displayFilteredSongs();
+            } else {
+                this.displaySongs();
+            }
+        }
+
         if (this.selectionMode) this.updateSelectionUI();
     }
     
@@ -6913,9 +6990,8 @@ class MusicPlayer {
 
     
     filterSongs(query) {
-        // Get the current song list to search within
-        const songsToSearch = this.currentPlaylist ? 
-            this.getPlaylistSongs(this.currentPlaylist) : this.songs;
+        // Search inside the active browse context (playlist/category/all songs).
+        const songsToSearch = this.getBrowseContextSongs();
 
         const normalizedQuery = this.normalizeSearchText(query);
         const queryTokens = this.tokenizeSearchText(normalizedQuery);
@@ -7198,6 +7274,7 @@ class MusicPlayer {
     }
 
     displaySearchNoResults(query) {
+        this.resetSongCoverRenderQueue();
         const safeQuery = this.escapeHtml(query || '');
         this.songsDiv.innerHTML = `
             <div class="empty-library">
@@ -7312,17 +7389,14 @@ class MusicPlayer {
             this.searchInput &&
             typeof this.searchInput.value === 'string' &&
             this.searchInput.value.trim().length > 0;
-        const filtered = Array.isArray(this.filteredSongs) ? this.filteredSongs : [];
-        const songsToShow = hasActiveLibrarySearch
-            ? filtered
-            : (filtered.length > 0 ? filtered : this.songs);
+        const songsToShow = this.getSongsForCurrentView();
         
         if (songsToShow.length === 0) {
             if (hasActiveLibrarySearch) {
                 this.displaySearchNoResults(this.searchInput.value.trim());
                 return;
             }
-            this.displayEmptyState();
+            this.displayContextEmptyState();
             return;
         }
         
@@ -7345,6 +7419,7 @@ class MusicPlayer {
         const endIndex = Math.min(startIndex + batchSize, songsToShow.length);
         
         if (startIndex === 0) {
+            if (!this.isSongCoverRenderTokenCurrent(coverRenderToken)) return;
             this.songsDiv.innerHTML = '';
             this.selectionAnchorDisplayIndex = null;
         }
@@ -7352,6 +7427,7 @@ class MusicPlayer {
         const fragment = document.createDocumentFragment();
         
         for (let i = startIndex; i < endIndex; i++) {
+            if (!this.isSongCoverRenderTokenCurrent(coverRenderToken)) return;
             const song = songsToShow[i];
             const originalIndex = this.getSongIndexForSong(song);
             if (!Number.isInteger(originalIndex) || originalIndex < 0) continue;
@@ -7465,12 +7541,15 @@ class MusicPlayer {
             this.addStarEventListeners(div, originalIndex);
             fragment.appendChild(div);
         }
+
+        if (!this.isSongCoverRenderTokenCurrent(coverRenderToken)) return;
         
         this.songsDiv.appendChild(fragment);
         this.updateSelectionHeaderState();
         
         if (endIndex < songsToShow.length) {
             requestAnimationFrame(() => {
+                if (!this.isSongCoverRenderTokenCurrent(coverRenderToken)) return;
                 this.renderSongsBatch(songsToShow, endIndex, coverRenderToken);
             });
         }
