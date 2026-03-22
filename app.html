@@ -457,12 +457,16 @@
 
                 <div class="download-card download-auth-card" id="downloadAuthCard">
                     <div class="download-auth-header">
-                        <div class="download-auth-title">Login</div>
-                        <div class="download-auth-subtitle">
+                        <div class="download-auth-title" id="dabAuthTitle">Login</div>
+                        <div class="download-auth-subtitle" id="dabAuthSubtitle">
                             You need to sign up to download music, or log in if you already have an account.
                         </div>
                     </div>
                     <div class="download-auth-fields" id="downloadAuthFields">
+                        <div class="download-field" id="dabUsernameField" style="display: none;">
+                            <label for="dabUsernameInput">Username</label>
+                            <input type="text" id="dabUsernameInput" placeholder="your_username">
+                        </div>
                         <div class="download-field">
                             <label for="dabEmailInput">Email</label>
                             <input type="text" id="dabEmailInput" placeholder="your.email@example.com">
@@ -471,9 +475,21 @@
                             <label for="dabPasswordInput">Password</label>
                             <input type="password" id="dabPasswordInput" placeholder="Password">
                         </div>
-                        <div class="download-auth-links">Forgot password?</div>
+                        <div class="download-field" id="dabConfirmPasswordField" style="display: none;">
+                            <label for="dabConfirmPasswordInput">Confirm Password</label>
+                            <input type="password" id="dabConfirmPasswordInput" placeholder="Confirm Password">
+                        </div>
+                        <button type="button" class="download-auth-links" id="dabForgotPassword">Forgot password?</button>
                         <button class="download-btn primary download-login-btn" id="dabLoginBtn">Login</button>
-                        <div class="download-auth-footer">Don't have an account? <span>Register</span></div>
+                        <button class="download-btn primary download-login-btn" id="dabRegisterBtn" style="display: none;">Create Account</button>
+                        <div class="download-auth-footer" id="dabAuthFooterLogin">
+                            Don't have an account?
+                            <button type="button" class="download-auth-link-btn" id="dabShowRegisterBtn">Register</button>
+                        </div>
+                        <div class="download-auth-footer" id="dabAuthFooterRegister" style="display: none;">
+                            Already have an account?
+                            <button type="button" class="download-auth-link-btn" id="dabShowLoginBtn">Login</button>
+                        </div>
                     </div>
                     <div class="download-status" id="dabStatus">Not logged in</div>
                 </div>

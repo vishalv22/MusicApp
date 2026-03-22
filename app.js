@@ -62,6 +62,7 @@ class MusicPlayer {
         this.downloadJobCounter = 0;
         this.dabLoggedIn = false;
         this.dabUserName = '';
+        this.dabAuthMode = 'login';
         this.librarySearchValue = '';
         this.defaultSearchPlaceholder = '';
         this.downloadLastQuery = '';
@@ -324,9 +325,21 @@ class MusicPlayer {
             downloadAuthCard: 'downloadAuthCard',
             downloadAuthFields: 'downloadAuthFields',
             downloadPostLogin: 'downloadPostLogin',
+            dabAuthTitleEl: 'dabAuthTitle',
+            dabAuthSubtitleEl: 'dabAuthSubtitle',
+            dabUsernameField: 'dabUsernameField',
+            dabUsernameInput: 'dabUsernameInput',
             dabEmailInput: 'dabEmailInput',
             dabPasswordInput: 'dabPasswordInput',
+            dabConfirmPasswordField: 'dabConfirmPasswordField',
+            dabConfirmPasswordInput: 'dabConfirmPasswordInput',
+            dabForgotPassword: 'dabForgotPassword',
             dabLoginBtn: 'dabLoginBtn',
+            dabRegisterBtn: 'dabRegisterBtn',
+            dabShowRegisterBtn: 'dabShowRegisterBtn',
+            dabShowLoginBtn: 'dabShowLoginBtn',
+            dabAuthFooterLogin: 'dabAuthFooterLogin',
+            dabAuthFooterRegister: 'dabAuthFooterRegister',
             dabLogoutBtn: 'dabLogoutBtn',
             dabStatusEl: 'dabStatus',
             downloadLogsToggleBtn: 'downloadLogsToggleBtn',
@@ -3935,6 +3948,30 @@ class MusicPlayer {
             };
         }
         if (this.dabLoginBtn) this.dabLoginBtn.onclick = () => this.handleDabLogin();
+        if (this.dabRegisterBtn) this.dabRegisterBtn.onclick = () => this.handleDabRegister();
+        if (this.dabForgotPassword) this.dabForgotPassword.onclick = () => this.handleDabForgotPassword();
+        if (this.dabShowRegisterBtn) {
+            this.dabShowRegisterBtn.onclick = () => {
+                this.setDabAuthMode('register');
+                this.setDabStatus('Create a new account');
+                if (this.dabUsernameInput && !this.dabUsernameInput.value.trim()) {
+                    const seed = String(this.dabEmailInput?.value || '').trim().split('@')[0];
+                    if (seed) {
+                        this.dabUsernameInput.value = seed.replace(/[^a-zA-Z0-9_]/g, '_');
+                    }
+                }
+                if (this.dabPasswordInput) this.dabPasswordInput.value = '';
+                if (this.dabConfirmPasswordInput) this.dabConfirmPasswordInput.value = '';
+            };
+        }
+        if (this.dabShowLoginBtn) {
+            this.dabShowLoginBtn.onclick = () => {
+                this.setDabAuthMode('login');
+                this.setDabStatus('Not logged in');
+                if (this.dabPasswordInput) this.dabPasswordInput.value = '';
+                if (this.dabConfirmPasswordInput) this.dabConfirmPasswordInput.value = '';
+            };
+        }
         if (this.dabLogoutBtn) this.dabLogoutBtn.onclick = () => this.handleDabLogout();
         if (this.downloadLogsToggleBtn) this.downloadLogsToggleBtn.onclick = () => this.toggleDownloadLogs();
         if (this.downloadCopyLogsBtn) this.downloadCopyLogsBtn.onclick = () => this.copyDownloadLogs();
@@ -3950,6 +3987,7 @@ class MusicPlayer {
             this.downloadIpcBound = true;
         }
 
+        this.setDabAuthMode('login');
         this.refreshDownloadSettings();
     }
 
@@ -4015,6 +4053,42 @@ class MusicPlayer {
         if (!this.dabStatusEl) return;
         this.dabStatusEl.textContent = message;
         this.dabStatusEl.style.color = ok ? '#3ddc97' : '';
+    }
+
+    setDabAuthMode(mode = 'login') {
+        const nextMode = mode === 'register' ? 'register' : 'login';
+        this.dabAuthMode = nextMode;
+        const isRegister = nextMode === 'register';
+
+        if (this.dabAuthTitleEl) {
+            this.dabAuthTitleEl.textContent = isRegister ? 'Register' : 'Login';
+        }
+        if (this.dabAuthSubtitleEl) {
+            this.dabAuthSubtitleEl.textContent = isRegister
+                ? 'Create an account to download music.'
+                : 'You need to sign up to download music, or log in if you already have an account.';
+        }
+        if (this.dabForgotPassword) {
+            this.dabForgotPassword.style.display = isRegister ? 'none' : 'block';
+        }
+        if (this.dabUsernameField) {
+            this.dabUsernameField.style.display = isRegister ? 'flex' : 'none';
+        }
+        if (this.dabLoginBtn) {
+            this.dabLoginBtn.style.display = isRegister ? 'none' : 'block';
+        }
+        if (this.dabConfirmPasswordField) {
+            this.dabConfirmPasswordField.style.display = isRegister ? 'flex' : 'none';
+        }
+        if (this.dabRegisterBtn) {
+            this.dabRegisterBtn.style.display = isRegister ? 'block' : 'none';
+        }
+        if (this.dabAuthFooterLogin) {
+            this.dabAuthFooterLogin.style.display = isRegister ? 'none' : 'block';
+        }
+        if (this.dabAuthFooterRegister) {
+            this.dabAuthFooterRegister.style.display = isRegister ? 'block' : 'none';
+        }
     }
 
     setDownloadResultsStatus(message, options = {}) {
@@ -4160,6 +4234,7 @@ class MusicPlayer {
         }
         if (!loggedIn) {
             if (this.downloadLogsPanel) this.downloadLogsPanel.style.display = 'none';
+            this.setDabAuthMode(this.dabAuthMode);
         }
         if (this.downloadLogsToggleBtn && this.downloadLogsPanel) {
             const logsVisible = window.getComputedStyle(this.downloadLogsPanel).display !== 'none';
@@ -4187,6 +4262,7 @@ class MusicPlayer {
             if (this.dabPasswordInput) this.dabPasswordInput.value = '';
             this.dabLoggedIn = true;
             this.setLoggedInUser(email);
+            this.setDabAuthMode('login');
             await this.refreshDownloadSettings();
             if (this.searchInput && this.currentView === 'download') {
                 this.searchInput.placeholder = 'Search online catalog...';
@@ -4197,11 +4273,66 @@ class MusicPlayer {
         }
     }
 
+    async handleDabRegister() {
+        const username = this.dabUsernameInput?.value?.trim();
+        const email = this.dabEmailInput?.value?.trim();
+        const password = this.dabPasswordInput?.value ?? '';
+        const confirmPassword = this.dabConfirmPasswordInput?.value ?? '';
+
+        if (!username || !email || !password || !confirmPassword) {
+            this.showNotification('Enter username, email, password, and confirm password', 'error');
+            return;
+        }
+        if (password !== confirmPassword) {
+            this.showNotification('Password and confirm password do not match', 'error');
+            return;
+        }
+
+        this.setDabStatus('Creating account...');
+        const result = await ipcRenderer.invoke('dab-register', { username, email, password });
+        if (result?.ok) {
+            this.dabLoggedIn = false;
+            this.setDabAuthMode('login');
+            if (this.dabEmailInput) this.dabEmailInput.value = email;
+            if (this.dabPasswordInput) this.dabPasswordInput.value = '';
+            if (this.dabConfirmPasswordInput) this.dabConfirmPasswordInput.value = '';
+            this.setDabStatus('Registration successful. Please log in.');
+            this.showNotification('Registration successful. Please log in.', 'success');
+            if (this.dabPasswordInput) this.dabPasswordInput.focus();
+            return;
+        }
+
+        this.setDabStatus(result?.error || 'Registration failed');
+        this.showNotification(result?.error || 'Registration failed', 'error');
+    }
+
+    async handleDabForgotPassword() {
+        const email = this.dabEmailInput?.value?.trim();
+        if (!email) {
+            this.showNotification('Enter your email first', 'info');
+            return;
+        }
+
+        this.setDabStatus('Sending reset link...');
+        const result = await ipcRenderer.invoke('dab-forgot-password', { email });
+        if (result?.ok) {
+            this.setDabStatus(result.message || 'Password reset link sent');
+            this.showNotification(result.message || 'Password reset link sent', 'success');
+            return;
+        }
+
+        this.setDabStatus(result?.error || 'Failed to send reset link');
+        this.showNotification(result?.error || 'Failed to send reset link', 'error');
+    }
+
     async handleDabLogout() {
         await ipcRenderer.invoke('dab-logout');
         this.showNotification('Logged out', 'info');
         this.dabLoggedIn = false;
         this.setLoggedInUser('');
+        this.setDabAuthMode('login');
+        if (this.dabPasswordInput) this.dabPasswordInput.value = '';
+        if (this.dabConfirmPasswordInput) this.dabConfirmPasswordInput.value = '';
         await this.refreshDownloadSettings();
         if (this.searchInput && this.currentView === 'download') {
             this.searchInput.placeholder = 'Log in to search the catalog';

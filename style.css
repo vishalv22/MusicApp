@@ -5104,6 +5104,15 @@ body.light-theme #spotdlFrame {
     font-size: 12px;
     color: rgba(0, 212, 150, 0.9);
     text-align: right;
+    border: none;
+    background: transparent;
+    padding: 0;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.download-auth-links:hover {
+    text-decoration: underline;
 }
 
 .download-login-btn {
@@ -5120,6 +5129,20 @@ body.light-theme #spotdlFrame {
 
 .download-auth-footer span {
     color: rgba(0, 212, 150, 0.9);
+}
+
+.download-auth-link-btn {
+    border: none;
+    background: transparent;
+    padding: 0;
+    margin: 0;
+    color: rgba(0, 212, 150, 0.9);
+    font: inherit;
+    cursor: pointer;
+}
+
+.download-auth-link-btn:hover {
+    text-decoration: underline;
 }
 
 .download-post-login {
@@ -5717,6 +5740,10 @@ body.light-theme .download-auth-footer {
 }
 
 body.light-theme .download-auth-links {
+    color: rgba(0, 140, 90, 0.9);
+}
+
+body.light-theme .download-auth-link-btn {
     color: rgba(0, 140, 90, 0.9);
 }
 

@@ -28,6 +28,10 @@ app.commandLine.appendSwitch('disable-frame-rate-limit');
 const APP_NAME = 'ViMusic';
 const APP_ID = 'com.vishal.vimusic';
 const DAB_DEFAULT_API_URL = 'https://dabmusic.xyz';
+const DAB_API_TIMEOUT_MS = 45000;
+const DAB_AUTH_TIMEOUT_MS = 60000;
+const DAB_SEARCH_TIMEOUT_MS = 45000;
+const DAB_STREAM_TIMEOUT_MS = 30000;
 
 let dabProcess = null;
 let dabProcessId = 0;
@@ -124,7 +128,13 @@ const resolveDabBinaryPath = () => {
     return { path: binaryName, found: false };
 };
 
-const requestJson = ({ url, method = 'GET', headers = {}, body }) => {
+const isRequestTimeoutError = (error) => {
+    if (!error) return false;
+    if (error.code === 'ETIMEDOUT' || error.code === 'ERR_HTTP_REQUEST_TIMEOUT') return true;
+    return /timed out/i.test(String(error.message || ''));
+};
+
+const requestJson = ({ url, method = 'GET', headers = {}, body, timeoutMs = DAB_API_TIMEOUT_MS }) => {
     return new Promise((resolve, reject) => {
         const target = new URL(url);
         const client = target.protocol === 'https:' ? https : http;
@@ -134,6 +144,21 @@ const requestJson = ({ url, method = 'GET', headers = {}, body }) => {
             port: target.port || (target.protocol === 'https:' ? 443 : 80),
             path: `${target.pathname}${target.search}`,
             headers
+        };
+
+        let settled = false;
+        let timeoutHandle = null;
+        const finishResolve = (value) => {
+            if (settled) return;
+            settled = true;
+            if (timeoutHandle) clearTimeout(timeoutHandle);
+            resolve(value);
+        };
+        const finishReject = (error) => {
+            if (settled) return;
+            settled = true;
+            if (timeoutHandle) clearTimeout(timeoutHandle);
+            reject(error);
         };
 
         const req = client.request(options, (res) => {
@@ -146,14 +171,21 @@ const requestJson = ({ url, method = 'GET', headers = {}, body }) => {
                     try {
                         data = JSON.parse(raw);
                     } catch (error) {
-                        return resolve({ status: res.statusCode, headers: res.headers, data: raw });
+                        return finishResolve({ status: res.statusCode, headers: res.headers, data: raw });
                     }
                 }
-                resolve({ status: res.statusCode, headers: res.headers, data });
+                finishResolve({ status: res.statusCode, headers: res.headers, data });
             });
         });
 
-        req.on('error', reject);
+        req.on('error', finishReject);
+        if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+            timeoutHandle = setTimeout(() => {
+                const timeoutError = new Error(`Request timed out after ${timeoutMs}ms`);
+                timeoutError.code = 'ETIMEDOUT';
+                req.destroy(timeoutError);
+            }, timeoutMs);
+        }
 
         if (body) {
             const payload = typeof body === 'string' ? body : JSON.stringify(body);
@@ -338,17 +370,60 @@ const normalizeCoverUrl = (apiUrl, coverUrl) => {
 
 const DOWNLOADED_MEDIA_FILE_RE = /\.(mp3|wav|ogg|m4a|flac|opus|aac|alac|aiff|wma)$/i;
 
-const getLatestMediaMtimeMs = (rootDir) => {
-    if (!rootDir || !fs.existsSync(rootDir)) return 0;
+const createDabDownloadActivityTracker = (rootDir) => {
+    let downloadedFileDetected = false;
+    let watcher = null;
 
-    let latest = 0;
+    const markIfMediaPath = (candidatePath) => {
+        if (!candidatePath) return;
+        const fileName = path.basename(String(candidatePath));
+        if (DOWNLOADED_MEDIA_FILE_RE.test(fileName)) {
+            downloadedFileDetected = true;
+        }
+    };
+
+    if (rootDir && fs.existsSync(rootDir)) {
+        try {
+            watcher = fs.watch(rootDir, { recursive: true }, (eventType, fileName) => {
+                if (!fileName) return;
+                const normalized = Buffer.isBuffer(fileName) ? fileName.toString('utf8') : String(fileName);
+                markIfMediaPath(normalized);
+            });
+            watcher.on('error', (error) => {
+                console.warn('DAB download watcher error:', error?.message || error);
+            });
+        } catch (error) {
+            // Recursive fs.watch may be unsupported on some platforms; async fallback scan still handles detection.
+        }
+    }
+
+    return {
+        wasDetected() {
+            return downloadedFileDetected;
+        },
+        close() {
+            if (!watcher) return;
+            try {
+                watcher.close();
+            } catch {
+                // Ignore watcher close failures.
+            }
+            watcher = null;
+        }
+    };
+};
+
+const hasMediaFileNewerThan = async (rootDir, thresholdMs) => {
+    if (!rootDir || !fs.existsSync(rootDir)) return false;
+
+    const safeThreshold = Number.isFinite(thresholdMs) ? thresholdMs : 0;
     const stack = [rootDir];
 
     while (stack.length) {
         const current = stack.pop();
         let entries = [];
         try {
-            entries = fs.readdirSync(current, { withFileTypes: true });
+            entries = await fs.promises.readdir(current, { withFileTypes: true });
         } catch {
             continue;
         }
@@ -364,9 +439,9 @@ const getLatestMediaMtimeMs = (rootDir) => {
             }
 
             try {
-                const stat = fs.statSync(fullPath);
-                if (Number.isFinite(stat.mtimeMs) && stat.mtimeMs > latest) {
-                    latest = stat.mtimeMs;
+                const stat = await fs.promises.stat(fullPath);
+                if (Number.isFinite(stat.mtimeMs) && stat.mtimeMs > (safeThreshold + 1)) {
+                    return true;
                 }
             } catch {
                 // Ignore per-file stat failures and continue scanning.
@@ -374,13 +449,34 @@ const getLatestMediaMtimeMs = (rootDir) => {
         }
     }
 
-    return latest;
+    return false;
 };
 
 const sendDabEvent = (channel, payload) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send(channel, payload);
     }
+};
+
+const getApiErrorMessage = (data) => {
+    if (!data) return '';
+    if (typeof data === 'string') return data.trim();
+    if (typeof data !== 'object') return '';
+    const raw = data.error || data.message || data.detail || data.msg || '';
+    return typeof raw === 'string' ? raw.trim() : '';
+};
+
+const buildRegisterUsername = (email) => {
+    const safeEmail = String(email || '').trim().toLowerCase();
+    if (!safeEmail) {
+        return `user_${Date.now()}`;
+    }
+
+    const [localPart = '', domainPart = ''] = safeEmail.split('@');
+    const normalizedLocal = localPart.replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+    const normalizedDomain = domainPart.replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+    const base = [normalizedLocal, normalizedDomain].filter(Boolean).join('_').slice(0, 32);
+    return base || `user_${Date.now()}`;
 };
 
 ipcMain.handle('dab-get-settings', () => {
@@ -421,7 +517,8 @@ ipcMain.handle('dab-login', async (event, payload) => {
                 'Content-Type': 'application/json',
                 'User-Agent': 'ViMusic'
             },
-            body: { email, password }
+            body: { email, password },
+            timeoutMs: DAB_AUTH_TIMEOUT_MS
         });
 
         if (status === 401) {
@@ -451,8 +548,112 @@ ipcMain.handle('dab-login', async (event, payload) => {
         fs.writeFileSync(getDabTokenPath(), token);
         return { ok: true };
     } catch (error) {
+        if (isRequestTimeoutError(error)) {
+            return { ok: false, error: 'Login request timed out. Please try again.' };
+        }
         console.error('DAB login failed:', error);
         return { ok: false, error: 'Login failed.' };
+    }
+});
+
+ipcMain.handle('dab-register', async (event, payload) => {
+    try {
+        const apiUrl = normalizeApiUrl(payload?.apiUrl);
+        const providedUsername = payload?.username?.trim();
+        const email = payload?.email?.trim();
+        const password = payload?.password ?? '';
+
+        if (!providedUsername || !email || !password) {
+            return { ok: false, error: 'Username, email, and password are required.' };
+        }
+
+        ensureDabConfig({ apiUrl });
+        const username = providedUsername || buildRegisterUsername(email);
+        const registerBody = { username, email, password };
+
+        const endpoints = ['/api/auth/register', '/api/auth/signup'];
+        let lastStatus = 0;
+        let lastErrorText = '';
+        for (const endpoint of endpoints) {
+            const { status, data } = await requestJson({
+                url: `${apiUrl}${endpoint}`,
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'ViMusic'
+                },
+                body: registerBody,
+                timeoutMs: DAB_AUTH_TIMEOUT_MS
+            });
+
+            lastStatus = status;
+            const apiError = getApiErrorMessage(data);
+            if (apiError) {
+                lastErrorText = apiError;
+            }
+
+            if (status === 404 || status === 405) {
+                continue;
+            }
+            if (status === 200 || status === 201) {
+                return { ok: true };
+            }
+            if (status === 409) {
+                return { ok: false, error: 'Account already exists. Please log in.' };
+            }
+            if (status === 401 || status === 403) {
+                return { ok: false, error: apiError || 'Registration is not allowed for this account.' };
+            }
+            if (status >= 400) {
+                return { ok: false, error: apiError || `Registration failed (${status}).` };
+            }
+        }
+
+        if (lastStatus) {
+            return { ok: false, error: lastErrorText || `Registration failed (${lastStatus}).` };
+        }
+        return { ok: false, error: 'Registration endpoint is unavailable.' };
+    } catch (error) {
+        if (isRequestTimeoutError(error)) {
+            return { ok: false, error: 'Registration request timed out. Please try again.' };
+        }
+        console.error('DAB register failed:', error);
+        return { ok: false, error: 'Registration failed.' };
+    }
+});
+
+ipcMain.handle('dab-forgot-password', async (event, payload) => {
+    try {
+        const apiUrl = normalizeApiUrl(payload?.apiUrl);
+        const email = payload?.email?.trim();
+        if (!email) {
+            return { ok: false, error: 'Email is required.' };
+        }
+
+        ensureDabConfig({ apiUrl });
+        const { status, data } = await requestJson({
+            url: `${apiUrl}/api/auth/forgot-password`,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'User-Agent': 'ViMusic'
+            },
+            body: { email },
+            timeoutMs: DAB_AUTH_TIMEOUT_MS
+        });
+
+        if (status === 200) {
+            return { ok: true, message: getApiErrorMessage(data) || 'Password reset link sent if email exists.' };
+        }
+
+        const apiError = getApiErrorMessage(data);
+        return { ok: false, error: apiError || `Forgot password failed (${status}).` };
+    } catch (error) {
+        if (isRequestTimeoutError(error)) {
+            return { ok: false, error: 'Forgot password request timed out. Please try again.' };
+        }
+        console.error('DAB forgot password failed:', error);
+        return { ok: false, error: 'Forgot password failed.' };
     }
 });
 
@@ -483,7 +684,8 @@ ipcMain.handle('dab-search', async (event, payload) => {
             headers: {
                 'User-Agent': 'ViMusic',
                 'Cookie': `session=${token}`
-            }
+            },
+            timeoutMs: DAB_SEARCH_TIMEOUT_MS
         });
 
         if (status === 401) {
@@ -541,6 +743,9 @@ ipcMain.handle('dab-search', async (event, payload) => {
 
         return { ok: true, results: normalized };
     } catch (error) {
+        if (isRequestTimeoutError(error)) {
+            return { ok: false, error: 'Search request timed out. Please try again.' };
+        }
         console.error('DAB search failed:', error);
         return { ok: false, error: 'Search failed.' };
     }
@@ -566,7 +771,8 @@ ipcMain.handle('dab-stream-url', async (event, payload) => {
             headers: {
                 'User-Agent': 'ViMusic',
                 'Cookie': `session=${token}`
-            }
+            },
+            timeoutMs: DAB_STREAM_TIMEOUT_MS
         });
 
         if (status === 401) {
@@ -578,6 +784,9 @@ ipcMain.handle('dab-stream-url', async (event, payload) => {
 
         return { ok: true, url: data?.url || data?.URL || '' };
     } catch (error) {
+        if (isRequestTimeoutError(error)) {
+            return { ok: false, error: 'Preview request timed out. Please try again.' };
+        }
         console.error('DAB stream failed:', error);
         return { ok: false, error: 'Preview failed.' };
     }
@@ -622,7 +831,8 @@ ipcMain.handle('dab-download-track', (event, payload) => {
 
     const config = ensureDabConfig({ apiUrl, downloadLocation });
     ensureDirectory(config.DownloadLocation);
-    const baselineMediaMtimeMs = getLatestMediaMtimeMs(config.DownloadLocation);
+    const downloadStartMs = Date.now();
+    const activityTracker = createDabDownloadActivityTracker(config.DownloadLocation);
 
     const resolved = resolveDabBinaryPath();
     if (!resolved.found) {
@@ -652,9 +862,17 @@ ipcMain.handle('dab-download-track', (event, payload) => {
     dabProcess.stderr.on('data', (data) => {
         sendDabEvent('dab-log', { id: processId, source: 'stderr', message: data.toString() });
     });
-    dabProcess.on('close', (code) => {
-        const latestMediaMtimeMs = getLatestMediaMtimeMs(config.DownloadLocation);
-        const downloadedFileDetected = latestMediaMtimeMs > (baselineMediaMtimeMs + 1);
+    dabProcess.on('close', async (code) => {
+        let downloadedFileDetected = activityTracker.wasDetected();
+        if (!downloadedFileDetected) {
+            try {
+                downloadedFileDetected = await hasMediaFileNewerThan(config.DownloadLocation, downloadStartMs);
+            } catch (error) {
+                console.warn('Failed to verify downloaded file changes:', error?.message || error);
+            }
+        }
+
+        activityTracker.close();
         sendDabEvent('dab-exit', { id: processId, code, downloadedFileDetected });
         if (dabActiveProcessId === processId) {
             dabActiveProcessId = null;
@@ -662,6 +880,7 @@ ipcMain.handle('dab-download-track', (event, payload) => {
         dabProcess = null;
     });
     dabProcess.on('error', (error) => {
+        activityTracker.close();
         sendDabEvent('dab-log', { id: processId, source: 'stderr', message: error.message });
         sendDabEvent('dab-exit', { id: processId, code: 1, downloadedFileDetected: false });
         if (dabActiveProcessId === processId) {
