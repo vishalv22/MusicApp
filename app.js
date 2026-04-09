@@ -9659,11 +9659,6 @@ class MusicPlayer {
         const isSettingsVisible = window.getComputedStyle(this.settingsPanel).display !== 'none';
         
         if (isSettingsVisible) {
-            if (this.settingsPrevPanelWidths) {
-                this.leftPanel.style.width = this.settingsPrevPanelWidths.left || '';
-                this.rightPanel.style.width = this.settingsPrevPanelWidths.right || '';
-                this.settingsPrevPanelWidths = null;
-            }
             this.showMusicView();
             this.settingsBtn.classList.remove('active');
         } else {
@@ -9679,12 +9674,6 @@ class MusicPlayer {
             this.currentView = 'settings';
             this.loadAllSettings();
             this.switchSettingsTab(this.settings.settingsActiveTab || 'playback', { skipSave: true });
-            this.settingsPrevPanelWidths = {
-                left: this.leftPanel.style.width,
-                right: this.rightPanel.style.width
-            };
-            this.leftPanel.style.width = '';
-            this.rightPanel.style.width = '';
         }
     }
     

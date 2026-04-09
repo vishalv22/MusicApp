@@ -2,7 +2,7 @@
 
 ViMusic is an Electron desktop music player focused on local-library playback with lyrics, playlists, video attachments, and an integrated online download/search panel.
 
-Current app version: **1.0.0**
+Current app version: **2.0.0**
 
 ## What It Does
 
@@ -139,4 +139,3 @@ Before packaging, make sure these resource paths exist (or update `package.json`
 - Check the download logs panel for detailed runtime error output.
 - Lyrics not found: ensure `.lrc` files exist or attach/paste manually.
 - Video attachment missing: reattach video and verify the source file still exists on disk.
-

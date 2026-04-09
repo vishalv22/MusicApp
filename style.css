@@ -491,44 +491,25 @@ body.light-theme .volume-icon img {
 }
 
 body.settings-open #rightPanel {
-    display: none;
+    display: flex;
 }
 
 body.settings-open #resizer {
-    display: none;
+    display: block;
 }
 
 body.settings-open .left-panel {
-    width: auto;
-    flex: 1 1 auto;
     min-width: 0;
     border-right: 1px solid #333;
 }
 
 body.settings-open .slide-panel.pinned + .left-panel {
-    width: auto;
-}
-
-body.settings-open .right-panel {
-    flex: 0 0 clamp(240px, 22vw, 340px);
-    width: clamp(240px, 22vw, 340px);
-    max-width: 36%;
-    min-width: 220px;
+    margin-left: 0;
 }
 
 @media (max-width: 1199px) {
     body.settings-open .left-panel {
         border-right: none;
-    }
-}
-
-@media (min-width: 1200px) {
-    body.settings-open #rightPanel {
-        display: flex;
-    }
-
-    body.settings-open #resizer {
-        display: block;
     }
 }
 
@@ -1458,14 +1439,44 @@ body.selection-mode #selectModeBtn {
 
 .lyrics-header {
     display: flex;
-    justify-content: space-between;
+    justify-content: flex-end;
     align-items: center;
+    min-width: 0;
 }
 
 .lyrics-controls {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
+    width: 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.lyrics-fetch-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1 1 170px;
+    min-width: 0;
+}
+
+.lyrics-actions-group {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    flex: 0 1 auto;
+    min-width: 0;
+    flex-wrap: wrap;
+    row-gap: 6px;
+}
+
+.lyrics-actions-group .theme-btn,
+.lyrics-actions-group .float-btn,
+.lyrics-fetch-group .lyrics-fetch-btn {
+    flex: 0 0 auto;
 }
 
 .lyrics-fetch-btn {
@@ -1487,11 +1498,15 @@ body.selection-mode #selectModeBtn {
 }
 
 .lyrics-fetch-status {
-    min-width: 140px;
-    text-align: right;
+    min-width: 0;
+    max-width: min(220px, 42vw);
+    text-align: left;
     font-size: 11px;
     color: #8e8e8e;
     letter-spacing: 0.2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .lyrics-fetch-status.is-fetching {
@@ -1504,6 +1519,21 @@ body.selection-mode #selectModeBtn {
 
 .lyrics-fetch-status.is-empty {
     color: #ff9f43;
+}
+
+@media (max-width: 1220px) {
+    .lyrics-fetch-group {
+        flex-basis: 100%;
+    }
+
+    .lyrics-actions-group {
+        width: 100%;
+        justify-content: flex-end;
+    }
+
+    .lyrics-fetch-status {
+        max-width: 100%;
+    }
 }
 
 .lyrics-timing-controls,
@@ -4620,6 +4650,149 @@ body.light-theme .playlist-editor-modal--create #modalDone:hover {
 .radio-pill:has(input[type="radio"]:checked) {
     background: var(--settings-active-bg);
     border-color: var(--settings-control-border-hover);
+}
+
+.settings-card.credit-card {
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    background:
+        radial-gradient(110% 120% at 0% 0%, rgba(91, 192, 222, 0.12), transparent 55%),
+        radial-gradient(120% 110% at 100% 0%, rgba(184, 85, 255, 0.12), transparent 50%),
+        var(--settings-card-bg);
+}
+
+.credit-top {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+}
+
+.credit-avatar {
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: #f7f9ff;
+    background: linear-gradient(145deg, #5f8dff, #8a5dff);
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.25);
+    flex: 0 0 auto;
+}
+
+.credit-identity {
+    min-width: 0;
+}
+
+.credit-name {
+    color: var(--settings-text);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.15px;
+}
+
+.credit-tagline {
+    margin-top: 2px;
+    color: var(--settings-muted);
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.credit-socials {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.credit-social {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    padding: 10px 11px;
+    border-radius: 10px;
+    border: 1px solid var(--settings-control-border);
+    background: var(--settings-control-bg);
+    color: var(--settings-text);
+    text-decoration: none;
+    transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.credit-social:hover {
+    border-color: var(--settings-control-border-hover);
+    background: var(--settings-hover-bg);
+    transform: translateY(-1px);
+}
+
+.credit-social:active {
+    transform: translateY(1px);
+}
+
+.credit-social-icon {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+}
+
+.credit-social.instagram .credit-social-icon {
+    color: #ffebf4;
+    background: linear-gradient(135deg, #f58529, #dd2a7b 45%, #8134af 78%, #515bd4);
+}
+
+.credit-social.github .credit-social-icon {
+    color: #f3f4f6;
+    background: linear-gradient(135deg, #2f3138, #15171d);
+}
+
+.credit-social-icon svg {
+    width: 16px;
+    height: 16px;
+    display: block;
+}
+
+.credit-social-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.credit-social-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--settings-text);
+}
+
+.credit-social-handle {
+    margin-top: 1px;
+    font-size: 11px;
+    color: var(--settings-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.credit-footnote {
+    font-size: 11px;
+    color: var(--settings-muted);
+    letter-spacing: 0.15px;
+}
+
+@media (max-width: 760px) {
+    .credit-socials {
+        grid-template-columns: 1fr;
+    }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -27,6 +27,7 @@ app.commandLine.appendSwitch('disable-frame-rate-limit');
 
 const APP_NAME = 'ViMusic';
 const APP_ID = 'com.vishal.vimusic';
+const APP_ICON_PATH = path.join(__dirname, 'icons', 'icon.ico');
 const DAB_DEFAULT_API_URL = 'https://dabmusic.xyz';
 const DAB_API_TIMEOUT_MS = 45000;
 const DAB_AUTH_TIMEOUT_MS = 60000;
@@ -223,6 +224,7 @@ function createWindow() {
         x: windowSettings.x,
         y: windowSettings.y,
         title: APP_NAME,
+        icon: APP_ICON_PATH,
         webPreferences: {
             nodeIntegration: true,
             contextIsolation: false,
@@ -1397,6 +1399,7 @@ ipcMain.on('create-floating-lyrics', (event) => {
     floatingWindow = new BrowserWindow({
         width: 1200,
         height: 180,
+        icon: APP_ICON_PATH,
         frame: false,
         transparent: true,
         alwaysOnTop: true,

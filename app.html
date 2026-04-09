@@ -426,7 +426,42 @@
 
                             <div class="settings-section">
                                 <h3>Credits</h3>
-                                <p>Built with Electron and Web Audio APIs.</p>
+                                <div class="settings-card credit-card">
+                                    <div class="credit-top">
+                                        <div class="credit-avatar" aria-hidden="true">VV</div>
+                                        <div class="credit-identity">
+                                            <div class="credit-name">Vishal</div>
+                                            <div class="credit-tagline">Creator • @vishalv22</div>
+                                        </div>
+                                    </div>
+                                    <div class="credit-socials">
+                                        <a class="credit-social instagram" href="https://www.instagram.com/vishalv22_22" target="_blank" rel="noopener noreferrer" onclick="require('electron').shell.openExternal(this.href); return false;">
+                                            <span class="credit-social-icon" aria-hidden="true">
+                                                <svg viewBox="0 0 24 24" fill="none">
+                                                    <rect x="3.5" y="3.5" width="17" height="17" rx="5" stroke="currentColor" stroke-width="1.8"></rect>
+                                                    <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.8"></circle>
+                                                    <circle cx="17.25" cy="6.75" r="1.1" fill="currentColor"></circle>
+                                                </svg>
+                                            </span>
+                                            <span class="credit-social-text">
+                                                <span class="credit-social-label">Instagram</span>
+                                                <span class="credit-social-handle">@vishalv22_22</span>
+                                            </span>
+                                        </a>
+                                        <a class="credit-social github" href="https://github.com/vishalv22" target="_blank" rel="noopener noreferrer" onclick="require('electron').shell.openExternal(this.href); return false;">
+                                            <span class="credit-social-icon" aria-hidden="true">
+                                                <svg viewBox="0 0 24 24" fill="currentColor">
+                                                    <path d="M12 1.4a10.6 10.6 0 0 0-3.35 20.66c.53.1.72-.23.72-.5v-1.78c-2.95.64-3.57-1.25-3.57-1.25-.48-1.23-1.17-1.56-1.17-1.56-.96-.66.08-.65.08-.65 1.05.08 1.6 1.08 1.6 1.08.94 1.61 2.46 1.15 3.06.88.1-.68.37-1.15.66-1.42-2.36-.27-4.84-1.18-4.84-5.27 0-1.16.41-2.11 1.08-2.86-.1-.27-.47-1.38.11-2.88 0 0 .89-.28 2.92 1.08a10.11 10.11 0 0 1 5.31 0c2.03-1.36 2.91-1.08 2.91-1.08.58 1.5.22 2.61.11 2.88.67.75 1.08 1.7 1.08 2.86 0 4.1-2.49 4.99-4.86 5.25.38.34.72 1 .72 2.02v2.99c0 .27.19.6.73.5A10.6 10.6 0 0 0 12 1.4Z"></path>
+                                                </svg>
+                                            </span>
+                                            <span class="credit-social-text">
+                                                <span class="credit-social-label">GitHub</span>
+                                                <span class="credit-social-handle">github.com/vishalv22</span>
+                                            </span>
+                                        </a>
+                                    </div>
+                                    <div class="credit-footnote">Built with Electron and Web Audio APIs.</div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -668,15 +703,19 @@
                 </div>
                 
                 <div class="lyrics-header">
-                    <div class="lyrics-controls" style="margin-left: auto;">
-                        <button id="autoFetchLyricsBtn" class="theme-btn lyrics-fetch-btn disabled" title="Auto Fetch Lyrics" disabled>AF</button>
-                        <span id="lyricsFetchStatus" class="lyrics-fetch-status" aria-live="polite"></span>
-                        <button id="lyricsToggleBtn" class="theme-btn active" title="Toggle Lyrics"><img src="icons/lyrics.png"></button>
-                        <button id="lyricsFontBtn" class="theme-btn" title="Lyrics Font Settings" style="display: none;"><img src="icons/font.png"></button>
-                        <button id="offsetToggleBtn" class="theme-btn" title="Adjust Lyrics Timing"><img src="icons/clock.png"></button>
-                        <button id="videoBtn" class="theme-btn" title="Toggle Video Player"><img src="icons/video.png"></button>
-                        <button id="visualizerBtn" class="theme-btn" title="Toggle Visualizer"><img src="icons/visualizer.svg"></button>
-                        <button id="floatLyricsBtn" class="float-btn" title="Open Floating Lyrics Window"><img src="icons/floating.png"></button>
+                    <div class="lyrics-controls">
+                        <div class="lyrics-fetch-group">
+                            <button id="autoFetchLyricsBtn" class="theme-btn lyrics-fetch-btn disabled" title="Auto Fetch Lyrics" disabled>AF</button>
+                            <span id="lyricsFetchStatus" class="lyrics-fetch-status" aria-live="polite"></span>
+                        </div>
+                        <div class="lyrics-actions-group">
+                            <button id="lyricsToggleBtn" class="theme-btn active" title="Toggle Lyrics"><img src="icons/lyrics.png"></button>
+                            <button id="lyricsFontBtn" class="theme-btn" title="Lyrics Font Settings" style="display: none;"><img src="icons/font.png"></button>
+                            <button id="offsetToggleBtn" class="theme-btn" title="Adjust Lyrics Timing"><img src="icons/clock.png"></button>
+                            <button id="videoBtn" class="theme-btn" title="Toggle Video Player"><img src="icons/video.png"></button>
+                            <button id="visualizerBtn" class="theme-btn" title="Toggle Visualizer"><img src="icons/visualizer.svg"></button>
+                            <button id="floatLyricsBtn" class="float-btn" title="Open Floating Lyrics Window"><img src="icons/floating.png"></button>
+                        </div>
                     </div>
                 </div>
                 <div id="lyrics" class="lyrics"></div>
