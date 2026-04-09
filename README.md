@@ -2,7 +2,7 @@
 
 ViMusic is an Electron desktop music player focused on local-library playback with lyrics, playlists, video attachments, and an integrated online download/search panel.
 
-Current app version: **2.0.0**
+Current app version: **2.1.0**
 
 ## What It Does
 
