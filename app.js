@@ -169,6 +169,11 @@ class MusicPlayer {
             .replace(/>/g, '&gt;');
     }
 
+    toFileUrl(filePath) {
+        if (!filePath || typeof filePath !== 'string') return '';
+        return `file:///${filePath.replace(/\\/g, '/')}`;
+    }
+
     logGuardWarningOnce(key, message) {
         if (!this.guardWarnings) this.guardWarnings = new Set();
         if (this.guardWarnings.has(key)) return;
@@ -785,6 +790,15 @@ class MusicPlayer {
             this.disableSelectionMode();
         }
         this.clearSongCoverUrlCache();
+        this.queueCoverUrlCache.forEach((url) => {
+            if (!url || !url.startsWith('blob:')) return;
+            try {
+                URL.revokeObjectURL(url);
+            } catch {
+                // Ignore revoke errors from stale/invalid URLs.
+            }
+        });
+        this.queueCoverUrlCache.clear();
         this.resetVirtualSongListState();
         this.musicList.innerHTML = '<div id="songs"></div>';
         this.songsDiv = document.getElementById('songs');
@@ -3557,7 +3571,9 @@ class MusicPlayer {
     }
 
     getQueueCoverUrl(song) {
-        if (!song || !song.picture) return null;
+        if (!song) return null;
+        if (song.thumbnailPath) return this.toFileUrl(song.thumbnailPath);
+        if (!song.picture) return null;
         const key = song.path || song.name || song.baseName;
         if (!key) return null;
 
@@ -7717,7 +7733,7 @@ class MusicPlayer {
     clearSongCoverUrlCache() {
         if (!this.songCoverUrlCache || this.songCoverUrlCache.size === 0) return;
         this.songCoverUrlCache.forEach((entry) => {
-            if (!entry?.url) return;
+            if (!entry?.url || !entry?.revoke) return;
             try {
                 URL.revokeObjectURL(entry.url);
             } catch {
@@ -7734,7 +7750,7 @@ class MusicPlayer {
         const pruneTarget = Math.max(0, cache.size - this.songCoverCacheLimit);
         let removed = 0;
         for (const [song, entry] of cache) {
-            if (entry?.url) {
+            if (entry?.url && entry?.revoke) {
                 try {
                     URL.revokeObjectURL(entry.url);
                 } catch {
@@ -7748,7 +7764,9 @@ class MusicPlayer {
     }
 
     getSongCoverUrl(song) {
-        if (!song?.picture) return null;
+        if (!song) return null;
+        if (song.thumbnailPath) return this.toFileUrl(song.thumbnailPath);
+        if (!song.picture) return null;
         if (!this.songCoverUrlCache) this.songCoverUrlCache = new Map();
 
         const cached = this.songCoverUrlCache.get(song);
@@ -7765,13 +7783,13 @@ class MusicPlayer {
             return null;
         }
 
-        this.songCoverUrlCache.set(song, { url });
+        this.songCoverUrlCache.set(song, { url, revoke: true });
         this.trimSongCoverUrlCache();
         return url;
     }
 
     queueSongCoverRender(coverDiv, song, token) {
-        if (!coverDiv || !song?.picture) return;
+        if (!coverDiv || (!song?.picture && !song?.thumbnailPath)) return;
         if (!this.isSongCoverRenderTokenCurrent(token)) return;
 
         const url = this.getSongCoverUrl(song);
@@ -8086,7 +8104,7 @@ class MusicPlayer {
             <span class="quality-indicator">${this.getQualityIndicatorHtml(song)}</span>
         `;
 
-        if (!skipCover && song.picture) {
+        if (!skipCover && (song.picture || song.thumbnailPath)) {
             const coverDiv = div.querySelector('.song-cover');
             if (coverDiv) this.queueSongCoverRender(coverDiv, song, coverRenderToken);
         }

@@ -1,6 +1,7 @@
-const { app, BrowserWindow, ipcMain, dialog, globalShortcut, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, globalShortcut, shell, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
 const http = require('http');
 const https = require('https');
@@ -350,6 +351,84 @@ ipcMain.on('window-close', () => mainWindow.close());
 // Get user data directory - moved to top to avoid lazy loading
 const getUserDataPath = () => {
     return path.join(app.getPath('userData'), 'storage');
+};
+
+const COVER_THUMBNAIL_SIZE = 72;
+const getCoverThumbnailCacheDir = () => path.join(getUserDataPath(), 'cover-thumbnails');
+
+const getCoverThumbnailCacheKey = (filePath) => {
+    const normalizedPath = path.normalize(String(filePath || ''));
+    const cacheSource = process.platform === 'win32' ? normalizedPath.toLowerCase() : normalizedPath;
+    return crypto.createHash('sha1').update(cacheSource).digest('hex');
+};
+
+const createSquareThumbnailImage = (sourceBuffer, size = COVER_THUMBNAIL_SIZE) => {
+    if (!Buffer.isBuffer(sourceBuffer) || sourceBuffer.length === 0) return null;
+
+    let image;
+    try {
+        image = nativeImage.createFromBuffer(sourceBuffer);
+    } catch (error) {
+        console.error('Failed to decode artwork for thumbnail generation:', error);
+        return null;
+    }
+
+    if (image.isEmpty()) return null;
+
+    const { width, height } = image.getSize();
+    if (!width || !height) return null;
+
+    const squareSize = Math.min(width, height);
+    const x = Math.max(0, Math.floor((width - squareSize) / 2));
+    const y = Math.max(0, Math.floor((height - squareSize) / 2));
+
+    try {
+        return image
+            .crop({ x, y, width: squareSize, height: squareSize })
+            .resize({ width: size, height: size, quality: 'good' });
+    } catch (error) {
+        console.error('Failed to resize artwork thumbnail:', error);
+        return null;
+    }
+};
+
+const ensureCoverThumbnail = (filePath, pictureData, stats = null) => {
+    if (!filePath || !pictureData) return null;
+
+    const sourceBuffer = Buffer.isBuffer(pictureData) ? pictureData : Buffer.from(pictureData);
+    if (!sourceBuffer.length) return null;
+
+    const fileStats = stats || fs.statSync(filePath);
+    const signature = `${Number(fileStats.mtimeMs || 0)}:${Number(fileStats.size || 0)}:${sourceBuffer.length}`;
+    const cacheDir = getCoverThumbnailCacheDir();
+    const cacheKey = getCoverThumbnailCacheKey(filePath);
+    const thumbnailPath = path.join(cacheDir, `${cacheKey}.png`);
+    const metaPath = path.join(cacheDir, `${cacheKey}.json`);
+
+    ensureDirectory(cacheDir);
+
+    if (fs.existsSync(thumbnailPath) && fs.existsSync(metaPath)) {
+        try {
+            const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+            if (meta?.signature === signature) {
+                return thumbnailPath;
+            }
+        } catch {
+            // Fall through and regenerate the cached thumbnail.
+        }
+    }
+
+    const thumbImage = createSquareThumbnailImage(sourceBuffer, COVER_THUMBNAIL_SIZE);
+    if (!thumbImage || thumbImage.isEmpty()) return null;
+
+    try {
+        fs.writeFileSync(thumbnailPath, thumbImage.toPNG());
+        fs.writeFileSync(metaPath, JSON.stringify({ signature }));
+        return thumbnailPath;
+    } catch (error) {
+        console.error('Failed to write artwork thumbnail cache:', error);
+        return null;
+    }
 };
 
 const normalizeApiUrl = (value) => {
@@ -1109,17 +1188,19 @@ ipcMain.handle('get-music-files', async () => {
     for (const filePath of dedupedFilePaths) {
         const file = path.basename(filePath);
         try {
+            const stats = fs.statSync(filePath);
             const metadata = await mm.parseFile(filePath);
             const common = metadata.common;
             const format = metadata.format || {};
+            const picture = common.picture && common.picture[0] ? common.picture[0].data : null;
              
             const musicTitle = sanitizeTitle(common.title || file.replace(/\.[^/.]+$/, ''));
             const genre = Array.isArray(common.genre) ? common.genre[0] : (common.genre || '');
             const releaseDate = common.date || common.year || common.originaldate || common.originalyear || '';
             
             // Get file stats for dateAdded
-            const stats = fs.statSync(filePath);
             const dateAdded = fileTimestamps[file] || stats.birthtime || stats.mtime;
+            const thumbnailPath = picture ? ensureCoverThumbnail(filePath, picture, stats) : null;
             
             const sampleRate = Number(format.sampleRate);
             const bitDepth = Number(format.bitsPerSample);
@@ -1138,7 +1219,8 @@ ipcMain.handle('get-music-files', async () => {
                 lossless: typeof format.lossless === 'boolean' ? format.lossless : null,
                 sampleRate: Number.isFinite(sampleRate) ? sampleRate : null,
                 bitDepth: Number.isFinite(bitDepth) ? bitDepth : null,
-                picture: common.picture && common.picture[0] ? common.picture[0].data : null,
+                picture: picture,
+                thumbnailPath: thumbnailPath,
                 dateAdded: dateAdded
             });
         } catch (error) {
@@ -1164,6 +1246,7 @@ ipcMain.handle('get-music-files', async () => {
                 sampleRate: null,
                 bitDepth: null,
                 picture: null,
+                thumbnailPath: null,
                 dateAdded: dateAdded
             });
         }
@@ -1307,6 +1390,7 @@ ipcMain.handle('get-video-files', async () => {
             album: 'Videos',
             duration: 0,
             picture: null,
+            thumbnailPath: null,
             isVideo: true,
             dateAdded: dateAdded
         });
